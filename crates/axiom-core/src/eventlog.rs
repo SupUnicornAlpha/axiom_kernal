@@ -16,6 +16,12 @@ pub struct ReplaySummary {
     pub failed_runs: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidationSummary {
+    pub valid_lines: usize,
+    pub invalid_lines: usize,
+}
+
 impl JsonlEventLog {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -76,6 +82,37 @@ impl JsonlEventLog {
             total_events,
             completed_runs,
             failed_runs,
+        })
+    }
+
+    pub fn validate_lines(&self) -> Result<ValidationSummary, String> {
+        if !self.path.exists() {
+            return Ok(ValidationSummary {
+                valid_lines: 0,
+                invalid_lines: 0,
+            });
+        }
+
+        let file = File::open(&self.path).map_err(|err| err.to_string())?;
+        let reader = BufReader::new(file);
+        let mut valid_lines = 0;
+        let mut invalid_lines = 0;
+
+        for line in reader.lines() {
+            let line = line.map_err(|err| err.to_string())?;
+            if line.starts_with("{\"run_id\":\"")
+                && line.contains("\"kind\":\"")
+                && line.ends_with('}')
+            {
+                valid_lines += 1;
+            } else {
+                invalid_lines += 1;
+            }
+        }
+
+        Ok(ValidationSummary {
+            valid_lines,
+            invalid_lines,
         })
     }
 }

@@ -3,7 +3,8 @@ use axiom_spec::{
 };
 
 use crate::{
-    CapabilityRegistry, CapabilityTransport, JsonlEventLog, Scheduler, Shell, ShellDecision,
+    CapabilityRegistry, CapabilityTransport, EventBus, InMemoryEventBus, JsonlEventLog, RunStore,
+    RunStoreRecord, Scheduler, Shell, ShellDecision,
 };
 
 #[derive(Debug)]
@@ -49,9 +50,11 @@ where
     pub fn run(&self, spec: &RunSpec) -> Result<RunReport, KernelError> {
         let mut state = RunState::from_spec(spec);
         let mut events = Vec::new();
+        let mut event_bus = InMemoryEventBus::new();
 
         self.push_event(
             &mut events,
+            &mut event_bus,
             Event {
                 run_id: spec.run_id.clone(),
                 step_id: None,
@@ -62,6 +65,7 @@ where
         state.status = RunStatus::Running;
         self.push_event(
             &mut events,
+            &mut event_bus,
             Event {
                 run_id: spec.run_id.clone(),
                 step_id: None,
@@ -76,6 +80,7 @@ where
                 let detail = format!("budget_exceeded:{}", spec.budget.max_steps);
                 self.push_event(
                     &mut events,
+                    &mut event_bus,
                     Event {
                         run_id: spec.run_id.clone(),
                         step_id: Some(original_step.id.clone()),
@@ -88,6 +93,7 @@ where
 
             self.push_event(
                 &mut events,
+                &mut event_bus,
                 Event {
                     run_id: spec.run_id.clone(),
                     step_id: Some(original_step.id.clone()),
@@ -100,6 +106,7 @@ where
                 ShellDecision::Allow => {
                     self.push_event(
                         &mut events,
+                        &mut event_bus,
                         Event {
                             run_id: spec.run_id.clone(),
                             step_id: Some(original_step.id.clone()),
@@ -112,6 +119,7 @@ where
                 ShellDecision::Rewrite { new_step, reason } => {
                     self.push_event(
                         &mut events,
+                        &mut event_bus,
                         Event {
                             run_id: spec.run_id.clone(),
                             step_id: Some(original_step.id.clone()),
@@ -125,6 +133,7 @@ where
                     state.denied_actions.push(original_step.id.clone());
                     self.push_event(
                         &mut events,
+                        &mut event_bus,
                         Event {
                             run_id: spec.run_id.clone(),
                             step_id: Some(original_step.id.clone()),
@@ -139,6 +148,7 @@ where
 
             self.push_event(
                 &mut events,
+                &mut event_bus,
                 Event {
                     run_id: spec.run_id.clone(),
                     step_id: Some(step.id.clone()),
@@ -150,6 +160,7 @@ where
             let effect = self.execute_step(spec, &state, &step, &mut events)?;
             self.push_event(
                 &mut events,
+                &mut event_bus,
                 Event {
                     run_id: spec.run_id.clone(),
                     step_id: Some(step.id.clone()),
@@ -160,6 +171,7 @@ where
             apply_effect(&mut state, effect.clone());
             self.push_event(
                 &mut events,
+                &mut event_bus,
                 Event {
                     run_id: spec.run_id.clone(),
                     step_id: Some(step.id.clone()),
@@ -174,6 +186,7 @@ where
         state.status = RunStatus::Completed;
         self.push_event(
             &mut events,
+            &mut event_bus,
             Event {
                 run_id: spec.run_id.clone(),
                 step_id: None,
@@ -181,6 +194,15 @@ where
                 detail: "ok".to_string(),
             },
         );
+
+        let mut run_store = crate::MemoryRunStore::new();
+        run_store.put(RunStoreRecord {
+            run_id: state.run_id.clone(),
+            state: state.clone(),
+        });
+
+        let _ = run_store.get(&state.run_id);
+        let _ = event_bus.snapshot();
 
         Ok(RunReport { state, events })
     }
@@ -211,6 +233,7 @@ where
                         if detail.starts_with("capability_denied:") {
                             self.push_event(
                                 events,
+                                &mut InMemoryEventBus::new(),
                                 Event {
                                     run_id: spec.run_id.clone(),
                                     step_id: Some(step.id.clone()),
@@ -232,6 +255,7 @@ where
                             format!("child_capability_not_delegated:{}", child_lease.capability_id);
                         self.push_event(
                             events,
+                            &mut InMemoryEventBus::new(),
                             Event {
                                 run_id: spec.run_id.clone(),
                                 step_id: Some(step.id.clone()),
@@ -244,6 +268,7 @@ where
                 }
                 self.push_event(
                     events,
+                    &mut InMemoryEventBus::new(),
                     Event {
                         run_id: spec.run_id.clone(),
                         step_id: Some(step.id.clone()),
@@ -254,6 +279,7 @@ where
                 let child_report = self.run(child)?;
                 self.push_event(
                     events,
+                    &mut InMemoryEventBus::new(),
                     Event {
                         run_id: spec.run_id.clone(),
                         step_id: Some(step.id.clone()),
@@ -281,10 +307,11 @@ where
         }
     }
 
-    fn push_event(&self, events: &mut Vec<Event>, event: Event) {
+    fn push_event(&self, events: &mut Vec<Event>, event_bus: &mut dyn EventBus, event: Event) {
         if let Some(event_log) = &self.event_log {
             let _ = event_log.append(&event);
         }
+        event_bus.publish(event.clone());
         events.push(event);
     }
 }
