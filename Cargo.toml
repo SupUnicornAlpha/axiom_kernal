@@ -1,0 +1,18 @@
+[workspace]
+members = [
+  "crates/axiom-spec",
+  "crates/axiom-core",
+  "crates/axiom-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+authors = ["Axiom Team"]
+repository = "https://github.com/your-org/axiom"
+
+[workspace.metadata.axiom]
+phase = "wild-growth"
+goal = "粗版内核先跑通，再用验证项目倒逼重构"
