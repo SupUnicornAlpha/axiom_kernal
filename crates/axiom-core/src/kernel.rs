@@ -3,7 +3,7 @@ use axiom_spec::{
 };
 
 use crate::{
-    CapabilityContext, CapabilityRegistry, JsonlEventLog, Scheduler, Shell, ShellDecision,
+    CapabilityRegistry, CapabilityTransport, JsonlEventLog, Scheduler, Shell, ShellDecision,
 };
 
 #[derive(Debug)]
@@ -19,28 +19,29 @@ pub struct RunReport {
     pub events: Vec<Event>,
 }
 
-pub struct Kernel<S, H> {
+pub struct Kernel<S, H, T> {
     scheduler: S,
     shell: H,
-    registry: CapabilityRegistry,
+    transport: T,
     event_log: Option<JsonlEventLog>,
 }
 
-impl<S, H> Kernel<S, H>
+impl<S, H, T> Kernel<S, H, T>
 where
     S: Scheduler,
     H: Shell,
+    T: CapabilityTransport,
 {
     pub fn new(
         scheduler: S,
         shell: H,
-        registry: CapabilityRegistry,
+        transport: T,
         event_log: Option<JsonlEventLog>,
     ) -> Self {
         Self {
             scheduler,
             shell,
-            registry,
+            transport,
             event_log,
         }
     }
@@ -204,27 +205,24 @@ where
                 capability_id,
                 input,
             } => {
-                if !CapabilityRegistry::is_leased(&spec.capability_leases, capability_id) {
-                    let detail = format!("capability_denied:{capability_id}");
-                    self.push_event(
-                        events,
-                        Event {
-                            run_id: spec.run_id.clone(),
-                            step_id: Some(step.id.clone()),
-                            kind: EventKind::CapabilityDenied,
-                            detail: detail.clone(),
-                        },
-                    );
-                    return Err(KernelError::Denied(detail));
-                }
-
-                let ctx = CapabilityContext {
-                    run_spec: spec,
-                    run_state: state,
-                };
-                self.registry
-                    .invoke(capability_id, input, &ctx)
-                    .map_err(KernelError::Capability)
+                self.transport
+                    .invoke(&spec.capability_leases, capability_id, input, spec, state)
+                    .map_err(|detail| {
+                        if detail.starts_with("capability_denied:") {
+                            self.push_event(
+                                events,
+                                Event {
+                                    run_id: spec.run_id.clone(),
+                                    step_id: Some(step.id.clone()),
+                                    kind: EventKind::CapabilityDenied,
+                                    detail: detail.clone(),
+                                },
+                            );
+                            KernelError::Denied(detail)
+                        } else {
+                            KernelError::Capability(detail)
+                        }
+                    })
             }
             StepAction::Delegate { child, merge_mode } => {
                 for child_lease in &child.capability_leases {

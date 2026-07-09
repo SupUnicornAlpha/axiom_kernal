@@ -21,5 +21,5 @@
 - 引入 `RunNamespace` 的真实校验
 - 引入 `BudgetGroup` 的 token/time/cost 维度
 - 实现 sidecar driver protocol
-- 实现 TypeScript SDK
+- 实现 TypeScript SDK（已建最小骨架）
 - 实现 Python SDK

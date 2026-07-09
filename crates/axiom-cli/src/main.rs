@@ -1,7 +1,10 @@
 use std::env;
 use std::path::PathBuf;
 
-use axiom_core::{AuditShell, CapabilityRegistry, JsonlEventLog, Kernel, QueueScheduler, StaticCapability};
+use axiom_core::{
+    AuditShell, CapabilityRegistry, JsonlEventLog, Kernel, LocalTransport, QueueScheduler,
+    StaticCapability,
+};
 use axiom_spec::{CapabilityLease, Effect, Message, RunSpec, Step, StepAction};
 
 fn main() {
@@ -62,7 +65,7 @@ fn run_demo() {
     let kernel = Kernel::new(
         QueueScheduler,
         AuditShell,
-        registry,
+        LocalTransport::new(registry),
         Some(JsonlEventLog::new(log_path)),
     );
 
