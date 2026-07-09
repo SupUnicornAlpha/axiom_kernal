@@ -10,4 +10,4 @@ pub use eventlog::{JsonlEventLog, ReplaySummary};
 pub use kernel::{Kernel, KernelError, RunReport};
 pub use scheduler::{QueueScheduler, Scheduler};
 pub use shell::{AuditShell, Shell, ShellDecision};
-pub use transport::{CapabilityTransport, LocalTransport};
+pub use transport::{CapabilityTransport, LocalTransport, RemoteTransportMock};
