@@ -147,6 +147,7 @@ pub struct Event {
     pub causation_id: Option<String>,
     pub commit_id: Option<String>,
     pub effect: Option<Effect>,
+    pub writer_epoch: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +203,7 @@ impl Event {
             causation_id: None,
             commit_id: None,
             effect: None,
+            writer_epoch: 0,
         }
     }
 }

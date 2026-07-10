@@ -2,6 +2,7 @@ mod capability;
 mod eventbus;
 mod eventlog;
 mod kernel;
+mod lease;
 mod runstore;
 mod scheduler;
 mod shell;
@@ -12,6 +13,7 @@ pub use capability::{CapabilityContext, CapabilityDriver, CapabilityRegistry, St
 pub use eventbus::{EventBus, InMemoryEventBus};
 pub use eventlog::{EventJournal, JsonlEventLog, ReplaySummary};
 pub use kernel::{Kernel, KernelError, RunReport};
+pub use lease::{FileRunLeaseStore, MemoryRunLeaseStore, RunLeaseStore, WriterLease};
 pub use runstore::{FileRunStore, MemoryRunStore, RunStore, RunStoreRecord};
 pub use scheduler::{QueueScheduler, Scheduler};
 pub use shell::{

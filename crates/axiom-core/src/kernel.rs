@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,8 +10,8 @@ use axiom_spec::{
 
 use crate::{
     CapabilityTransport, EventBus, EventJournal, InMemoryEventBus, JsonlEventLog,
-    LocalSubRunTransport, MemoryRunStore, RunStore, RunStoreRecord, Scheduler, Shell,
-    ShellDecision, SubRunTransport,
+    LocalSubRunTransport, MemoryRunLeaseStore, MemoryRunStore, RunLeaseStore, RunStore,
+    RunStoreRecord, Scheduler, Shell, ShellDecision, SubRunTransport, WriterLease,
 };
 
 #[derive(Debug)]
@@ -21,6 +22,7 @@ pub enum KernelError {
     EventLog(String),
     RunStore(String),
     MissingCheckpoint(String),
+    Lease(String),
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +44,9 @@ pub struct Kernel<S, H, T, R = LocalSubRunTransport> {
     subrun_transport: R,
     event_log: Option<Arc<dyn EventJournal>>,
     run_store: Arc<dyn RunStore>,
+    lease_store: Arc<dyn RunLeaseStore>,
+    writer_id: String,
+    lease_ttl_ms: u64,
 }
 
 impl<S, H, T> Kernel<S, H, T, LocalSubRunTransport>
@@ -58,6 +63,9 @@ where
             subrun_transport: LocalSubRunTransport,
             event_log: event_log.map(|journal| Arc::new(journal) as Arc<dyn EventJournal>),
             run_store: Arc::new(MemoryRunStore::new()),
+            lease_store: Arc::new(MemoryRunLeaseStore::new()),
+            writer_id: default_writer_id(),
+            lease_ttl_ms: 30_000,
         }
     }
 }
@@ -83,6 +91,9 @@ where
             subrun_transport,
             event_log: event_log.map(|journal| Arc::new(journal) as Arc<dyn EventJournal>),
             run_store: Arc::new(MemoryRunStore::new()),
+            lease_store: Arc::new(MemoryRunLeaseStore::new()),
+            writer_id: default_writer_id(),
+            lease_ttl_ms: 30_000,
         }
     }
 
@@ -101,19 +112,59 @@ where
             subrun_transport,
             event_log,
             run_store,
+            lease_store: Arc::new(MemoryRunLeaseStore::new()),
+            writer_id: default_writer_id(),
+            lease_ttl_ms: 30_000,
+        }
+    }
+
+    pub fn with_coordination(
+        scheduler: S,
+        shell: H,
+        transport: T,
+        subrun_transport: R,
+        event_log: Option<Arc<dyn EventJournal>>,
+        run_store: Arc<dyn RunStore>,
+        lease_store: Arc<dyn RunLeaseStore>,
+        writer_id: impl Into<String>,
+        lease_ttl_ms: u64,
+    ) -> Self {
+        Self {
+            scheduler,
+            shell,
+            transport,
+            subrun_transport,
+            event_log,
+            run_store,
+            lease_store,
+            writer_id: writer_id.into(),
+            lease_ttl_ms,
         }
     }
 
     pub fn run(&self, spec: &RunSpec) -> Result<RunReport, KernelError> {
-        self.run_from_state(
+        let mut lease = self.acquire_lease(&spec.run_id)?;
+        let result = self.run_from_state(
             spec,
             RunState::from_spec(spec),
             CommitCursor::default(),
             false,
-        )
+            &mut lease,
+        );
+        self.finish_lease(&lease, result)
     }
 
     pub fn resume(&self, spec: &RunSpec) -> Result<RunReport, KernelError> {
+        let mut lease = self.acquire_lease(&spec.run_id)?;
+        let result = self.resume_with_lease(spec, &mut lease);
+        self.finish_lease(&lease, result)
+    }
+
+    fn resume_with_lease(
+        &self,
+        spec: &RunSpec,
+        lease: &mut WriterLease,
+    ) -> Result<RunReport, KernelError> {
         let mut checkpoint = self
             .run_store
             .get(&spec.run_id)
@@ -132,7 +183,10 @@ where
                 checkpoint.checkpoint_version
             )));
         }
-        let recovered_events = self.recover_from_journal(spec, &mut checkpoint)?;
+        let recovered_events = self.recover_from_journal(spec, &mut checkpoint, lease)?;
+        self.lease_store
+            .validate(lease, now_ms()?)
+            .map_err(KernelError::Lease)?;
         self.run_store
             .put(checkpoint.clone())
             .map_err(KernelError::RunStore)?;
@@ -150,6 +204,7 @@ where
                 applied_commit_ids: checkpoint.applied_commit_ids,
             },
             true,
+            lease,
         )
     }
 
@@ -159,6 +214,7 @@ where
         mut state: RunState,
         mut cursor: CommitCursor,
         resumed: bool,
+        lease: &mut WriterLease,
     ) -> Result<RunReport, KernelError> {
         let mut events = Vec::new();
         let mut event_bus = InMemoryEventBus::new();
@@ -170,6 +226,7 @@ where
                 &mut event_bus,
                 &mut cursor,
                 &spec_digest,
+                lease,
                 Event::new(&spec.run_id, None, EventKind::RunCreated, &spec.name),
             )?;
         }
@@ -179,6 +236,7 @@ where
             &mut event_bus,
             &mut cursor,
             &spec_digest,
+            lease,
             Event::new(
                 &spec.run_id,
                 None,
@@ -190,7 +248,7 @@ where
                 },
             ),
         )?;
-        self.checkpoint(&state, &spec_digest, &cursor)?;
+        self.checkpoint(&state, &spec_digest, &cursor, lease)?;
 
         while let Some(original_step) = self.scheduler.next(spec, state.next_step_index) {
             if state.next_step_index >= spec.budget.max_steps {
@@ -201,6 +259,7 @@ where
                     &mut event_bus,
                     &mut cursor,
                     &spec_digest,
+                    lease,
                     Event::new(
                         &spec.run_id,
                         Some(original_step.id.clone()),
@@ -208,7 +267,7 @@ where
                         detail.clone(),
                     ),
                 )?;
-                self.checkpoint(&state, &spec_digest, &cursor)?;
+                self.checkpoint(&state, &spec_digest, &cursor, lease)?;
                 return Err(KernelError::BudgetExceeded(detail));
             }
 
@@ -217,6 +276,7 @@ where
                 &mut event_bus,
                 &mut cursor,
                 &spec_digest,
+                lease,
                 Event::new(
                     &spec.run_id,
                     Some(original_step.id.clone()),
@@ -232,6 +292,7 @@ where
                         &mut event_bus,
                         &mut cursor,
                         &spec_digest,
+                        lease,
                         Event::new(
                             &spec.run_id,
                             Some(original_step.id.clone()),
@@ -247,6 +308,7 @@ where
                         &mut event_bus,
                         &mut cursor,
                         &spec_digest,
+                        lease,
                         Event::new(
                             &spec.run_id,
                             Some(original_step.id.clone()),
@@ -263,6 +325,7 @@ where
                         &mut event_bus,
                         &mut cursor,
                         &spec_digest,
+                        lease,
                         Event::new(
                             &spec.run_id,
                             Some(original_step.id.clone()),
@@ -271,7 +334,7 @@ where
                         ),
                     )?;
                     state.next_step_index += 1;
-                    self.checkpoint(&state, &spec_digest, &cursor)?;
+                    self.checkpoint(&state, &spec_digest, &cursor, lease)?;
                     continue;
                 }
             };
@@ -281,6 +344,7 @@ where
                 &mut event_bus,
                 &mut cursor,
                 &spec_digest,
+                lease,
                 Event::new(
                     &spec.run_id,
                     Some(step.id.clone()),
@@ -289,13 +353,21 @@ where
                 ),
             )?;
 
-            let proposal =
-                self.execute_step(spec, &state, &step, &mut events, &mut cursor, &spec_digest)?;
+            let proposal = self.execute_step(
+                spec,
+                &state,
+                &step,
+                &mut events,
+                &mut cursor,
+                &spec_digest,
+                lease,
+            )?;
             self.push_event(
                 &mut events,
                 &mut event_bus,
                 &mut cursor,
                 &spec_digest,
+                lease,
                 Event::new(
                     &spec.run_id,
                     Some(step.id.clone()),
@@ -308,6 +380,7 @@ where
                 &mut event_bus,
                 &mut cursor,
                 &spec_digest,
+                lease,
                 Event::new(
                     &spec.run_id,
                     Some(step.id.clone()),
@@ -330,6 +403,7 @@ where
                 &mut event_bus,
                 &mut cursor,
                 &spec_digest,
+                lease,
                 committed_event,
             )?;
             if cursor.applied_commit_ids.insert(commit_id) {
@@ -337,7 +411,7 @@ where
             }
 
             state.next_step_index += 1;
-            self.checkpoint(&state, &spec_digest, &cursor)?;
+            self.checkpoint(&state, &spec_digest, &cursor, lease)?;
         }
 
         self.push_event(
@@ -345,10 +419,11 @@ where
             &mut event_bus,
             &mut cursor,
             &spec_digest,
+            lease,
             Event::new(&spec.run_id, None, EventKind::RunCompleted, "ok"),
         )?;
         state.status = RunStatus::Completed;
-        self.checkpoint(&state, &spec_digest, &cursor)?;
+        self.checkpoint(&state, &spec_digest, &cursor, lease)?;
 
         let _ = event_bus.snapshot();
 
@@ -363,6 +438,7 @@ where
         events: &mut Vec<Event>,
         cursor: &mut CommitCursor,
         spec_digest: &str,
+        lease: &mut WriterLease,
     ) -> Result<EffectProposal, KernelError> {
         match &step.action {
             StepAction::Message { role, content } => Ok(EffectProposal {
@@ -391,6 +467,7 @@ where
                             &mut InMemoryEventBus::new(),
                             cursor,
                             spec_digest,
+                            lease,
                             Event::new(
                                 &spec.run_id,
                                 Some(step.id.clone()),
@@ -411,6 +488,7 @@ where
                         &mut InMemoryEventBus::new(),
                         cursor,
                         spec_digest,
+                        lease,
                         Event::new(
                             &spec.run_id,
                             Some(step.id.clone()),
@@ -425,6 +503,7 @@ where
                     &mut InMemoryEventBus::new(),
                     cursor,
                     spec_digest,
+                    lease,
                     Event::new(
                         &spec.run_id,
                         Some(step.id.clone()),
@@ -440,6 +519,7 @@ where
                     &mut InMemoryEventBus::new(),
                     cursor,
                     spec_digest,
+                    lease,
                     Event::new(
                         &spec.run_id,
                         Some(step.id.clone()),
@@ -479,8 +559,13 @@ where
         event_bus: &mut dyn EventBus,
         cursor: &mut CommitCursor,
         spec_digest: &str,
+        lease: &mut WriterLease,
         mut event: Event,
     ) -> Result<(), KernelError> {
+        *lease = self
+            .lease_store
+            .renew(lease, now_ms()?, self.lease_ttl_ms)
+            .map_err(KernelError::Lease)?;
         let next_sequence = cursor.last_sequence + 1;
         event.sequence = next_sequence;
         event.timestamp_ms = SystemTime::now()
@@ -488,6 +573,7 @@ where
             .map_err(|err| KernelError::EventLog(err.to_string()))?
             .as_millis() as u64;
         event.spec_digest = spec_digest.to_string();
+        event.writer_epoch = lease.epoch;
         event.causation_id = (cursor.last_sequence > 0)
             .then(|| format!("{}:{}", event.run_id, cursor.last_sequence));
         if let Some(event_log) = &self.event_log {
@@ -504,13 +590,18 @@ where
         state: &RunState,
         spec_digest: &str,
         cursor: &CommitCursor,
+        lease: &WriterLease,
     ) -> Result<(), KernelError> {
+        self.lease_store
+            .validate(lease, now_ms()?)
+            .map_err(KernelError::Lease)?;
         self.run_store
             .put(RunStoreRecord {
                 checkpoint_version: 1,
                 run_id: state.run_id.clone(),
                 spec_digest: spec_digest.to_string(),
                 last_sequence: cursor.last_sequence,
+                writer_epoch: lease.epoch,
                 applied_commit_ids: cursor.applied_commit_ids.clone(),
                 state: state.clone(),
             })
@@ -521,7 +612,11 @@ where
         &self,
         spec: &RunSpec,
         checkpoint: &mut RunStoreRecord,
+        lease: &WriterLease,
     ) -> Result<Vec<Event>, KernelError> {
+        self.lease_store
+            .validate(lease, now_ms()?)
+            .map_err(KernelError::Lease)?;
         let Some(event_log) = &self.event_log else {
             return Ok(Vec::new());
         };
@@ -545,6 +640,12 @@ where
                 return Err(KernelError::EventLog(format!(
                     "event_sequence_gap:{}:{}",
                     checkpoint.last_sequence, event.sequence
+                )));
+            }
+            if event.writer_epoch < checkpoint.writer_epoch {
+                return Err(KernelError::Lease(format!(
+                    "journal_writer_epoch_regressed:{}:{}",
+                    checkpoint.writer_epoch, event.writer_epoch
                 )));
             }
             match event.kind {
@@ -578,9 +679,46 @@ where
                 _ => {}
             }
             checkpoint.last_sequence = event.sequence;
+            checkpoint.writer_epoch = checkpoint.writer_epoch.max(event.writer_epoch);
         }
         Ok(events)
     }
+
+    fn acquire_lease(&self, run_id: &str) -> Result<WriterLease, KernelError> {
+        self.lease_store
+            .acquire(run_id, &self.writer_id, now_ms()?, self.lease_ttl_ms)
+            .map_err(KernelError::Lease)
+    }
+
+    fn finish_lease(
+        &self,
+        lease: &WriterLease,
+        result: Result<RunReport, KernelError>,
+    ) -> Result<RunReport, KernelError> {
+        let release = self.lease_store.release(lease).map_err(KernelError::Lease);
+        match (result, release) {
+            (Err(error), _) => Err(error),
+            (Ok(report), Ok(())) => Ok(report),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+}
+
+fn now_ms() -> Result<u64, KernelError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .map_err(|err| KernelError::Lease(err.to_string()))
+}
+
+fn default_writer_id() -> String {
+    static WRITER_COUNTER: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "writer-{}-{}-{}",
+        std::process::id(),
+        now_ms().unwrap_or_default(),
+        WRITER_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn validate_child_run(parent: &RunSpec, child: &axiom_spec::ChildRunSpec) -> Result<(), String> {

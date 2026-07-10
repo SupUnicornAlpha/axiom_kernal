@@ -13,6 +13,7 @@ pub struct RunStoreRecord {
     pub run_id: String,
     pub spec_digest: String,
     pub last_sequence: u64,
+    pub writer_epoch: u64,
     pub applied_commit_ids: BTreeSet<String>,
     pub state: RunState,
 }
