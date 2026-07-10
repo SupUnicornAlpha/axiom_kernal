@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub type MetadataMap = BTreeMap<String, String>;
+pub const RUN_SPEC_SCHEMA_VERSION: u32 = 1;
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSpec {
@@ -192,7 +194,7 @@ impl Event {
         detail: impl Into<String>,
     ) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: EVENT_SCHEMA_VERSION,
             run_id: run_id.into(),
             step_id,
             kind,
@@ -221,7 +223,7 @@ impl From<EffectProposal> for Effect {
 impl RunSpec {
     pub fn new(run_id: impl Into<String>, name: impl Into<String>, steps: Vec<Step>) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: RUN_SPEC_SCHEMA_VERSION,
             run_id: run_id.into(),
             name: name.into(),
             namespace: RunNamespace {
