@@ -5,7 +5,7 @@ use axiom_core::{
     AuditShell, CapabilityRegistry, JsonlEventLog, Kernel, LocalTransport, QueueScheduler,
     StaticCapability,
 };
-use axiom_spec::{CapabilityLease, Effect, Message, RunSpec, Step, StepAction};
+use axiom_spec::{CapabilityLease, EffectProposal, Message, RunSpec, Step, StepAction};
 
 fn main() {
     let command = env::args().nth(1).unwrap_or_else(|| "demo".to_string());
@@ -23,7 +23,7 @@ fn run_demo() {
     registry.register(
         "tool/echo",
         StaticCapability::new(|input, _ctx| {
-            Ok(Effect {
+            Ok(EffectProposal {
                 summary: "tool_echo".to_string(),
                 messages: vec![Message {
                     role: "tool".to_string(),

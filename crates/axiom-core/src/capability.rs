@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use axiom_spec::{CapabilityLease, Effect, RunSpec, RunState};
+use axiom_spec::{CapabilityLease, EffectProposal, RunSpec, RunState};
 
 #[derive(Clone, Debug)]
 pub struct CapabilityContext<'a> {
@@ -9,17 +9,21 @@ pub struct CapabilityContext<'a> {
 }
 
 pub trait CapabilityDriver {
-    fn invoke(&self, input: &str, ctx: &CapabilityContext<'_>) -> Result<Effect, String>;
+    fn invoke(&self, input: &str, ctx: &CapabilityContext<'_>) -> Result<EffectProposal, String>;
 }
 
 pub struct StaticCapability {
-    handler: Box<dyn Fn(&str, &CapabilityContext<'_>) -> Result<Effect, String> + Send + Sync>,
+    handler:
+        Box<dyn Fn(&str, &CapabilityContext<'_>) -> Result<EffectProposal, String> + Send + Sync>,
 }
 
 impl StaticCapability {
     pub fn new<F>(handler: F) -> Self
     where
-        F: Fn(&str, &CapabilityContext<'_>) -> Result<Effect, String> + Send + Sync + 'static,
+        F: Fn(&str, &CapabilityContext<'_>) -> Result<EffectProposal, String>
+            + Send
+            + Sync
+            + 'static,
     {
         Self {
             handler: Box::new(handler),
@@ -28,7 +32,7 @@ impl StaticCapability {
 }
 
 impl CapabilityDriver for StaticCapability {
-    fn invoke(&self, input: &str, ctx: &CapabilityContext<'_>) -> Result<Effect, String> {
+    fn invoke(&self, input: &str, ctx: &CapabilityContext<'_>) -> Result<EffectProposal, String> {
         (self.handler)(input, ctx)
     }
 }
@@ -66,7 +70,7 @@ impl CapabilityRegistry {
         capability_id: &str,
         input: &str,
         ctx: &CapabilityContext<'_>,
-    ) -> Result<Effect, String> {
+    ) -> Result<EffectProposal, String> {
         self.drivers
             .get(capability_id)
             .ok_or_else(|| format!("capability_not_found:{capability_id}"))?

@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 use axiom_spec::{Event, EventKind};
 
+pub trait EventJournal: Send + Sync {
+    fn append(&self, event: &Event) -> Result<(), String>;
+}
+
 #[derive(Clone, Debug)]
 pub struct JsonlEventLog {
     path: PathBuf,
@@ -49,6 +53,8 @@ impl JsonlEventLog {
             escape(&event.detail)
         );
         file.write_all(line.as_bytes())
+            .and_then(|_| file.flush())
+            .and_then(|_| file.sync_data())
             .map_err(|err| err.to_string())
     }
 
@@ -118,6 +124,12 @@ impl JsonlEventLog {
     }
 }
 
+impl EventJournal for JsonlEventLog {
+    fn append(&self, event: &Event) -> Result<(), String> {
+        JsonlEventLog::append(self, event)
+    }
+}
+
 fn event_kind_name(kind: &EventKind) -> &'static str {
     match kind {
         EventKind::RunCreated => "RunCreated",
@@ -126,7 +138,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::ShellDecision => "ShellDecision",
         EventKind::StepStarted => "StepStarted",
         EventKind::StepCompleted => "StepCompleted",
-        EventKind::EffectApplied => "EffectApplied",
+        EventKind::EffectProposed => "EffectProposed",
+        EventKind::EffectCommitted => "EffectCommitted",
         EventKind::CapabilityDenied => "CapabilityDenied",
         EventKind::ChildRunCreated => "ChildRunCreated",
         EventKind::ChildRunCompleted => "ChildRunCompleted",

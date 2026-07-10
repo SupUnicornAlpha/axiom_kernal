@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use axiom_spec::RunState;
 
@@ -8,35 +9,50 @@ pub struct RunStoreRecord {
     pub state: RunState,
 }
 
-pub trait RunStore {
-    fn put(&mut self, record: RunStoreRecord);
-    fn get(&self, run_id: &str) -> Option<RunStoreRecord>;
-    fn list_run_ids(&self) -> Vec<String>;
+pub trait RunStore: Send + Sync {
+    fn put(&self, record: RunStoreRecord) -> Result<(), String>;
+    fn get(&self, run_id: &str) -> Result<Option<RunStoreRecord>, String>;
+    fn list_run_ids(&self) -> Result<Vec<String>, String>;
 }
 
 #[derive(Default, Clone, Debug)]
 pub struct MemoryRunStore {
-    records: BTreeMap<String, RunStoreRecord>,
+    records: Arc<RwLock<BTreeMap<String, RunStoreRecord>>>,
 }
 
 impl MemoryRunStore {
     pub fn new() -> Self {
         Self {
-            records: BTreeMap::new(),
+            records: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 }
 
 impl RunStore for MemoryRunStore {
-    fn put(&mut self, record: RunStoreRecord) {
-        self.records.insert(record.run_id.clone(), record);
+    fn put(&self, record: RunStoreRecord) -> Result<(), String> {
+        self.records
+            .write()
+            .map_err(|_| "run_store_write_lock_poisoned".to_string())?
+            .insert(record.run_id.clone(), record);
+        Ok(())
     }
 
-    fn get(&self, run_id: &str) -> Option<RunStoreRecord> {
-        self.records.get(run_id).cloned()
+    fn get(&self, run_id: &str) -> Result<Option<RunStoreRecord>, String> {
+        Ok(self
+            .records
+            .read()
+            .map_err(|_| "run_store_read_lock_poisoned".to_string())?
+            .get(run_id)
+            .cloned())
     }
 
-    fn list_run_ids(&self) -> Vec<String> {
-        self.records.keys().cloned().collect()
+    fn list_run_ids(&self) -> Result<Vec<String>, String> {
+        Ok(self
+            .records
+            .read()
+            .map_err(|_| "run_store_read_lock_poisoned".to_string())?
+            .keys()
+            .cloned()
+            .collect())
     }
 }

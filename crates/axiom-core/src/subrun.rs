@@ -1,4 +1,4 @@
-use axiom_spec::{ChildRunResult, ChildRunSpec, Effect, RunUsage};
+use axiom_spec::{ChildRunResult, ChildRunSpec, EffectProposal, RunUsage};
 
 use crate::{KernelError, RunReport};
 
@@ -41,7 +41,7 @@ impl SubRunTransport for RemoteSubRunTransportMock {
 fn result_from_report(child: &ChildRunSpec, report: RunReport, transport: &str) -> ChildRunResult {
     let event_count = report.events.len();
     let steps = report.state.next_step_index;
-    let proposed_effect = Effect {
+    let proposed_effect = EffectProposal {
         summary: format!("child_result:{}", child.run.run_id),
         messages: report.state.messages,
         outputs: report.state.outputs,

@@ -68,7 +68,7 @@ pub struct ChildRunResult {
     pub status: RunStatus,
     pub summary: String,
     pub artifacts: Vec<String>,
-    pub proposed_effects: Vec<Effect>,
+    pub proposed_effects: Vec<EffectProposal>,
     pub events_digest: String,
     pub usage: RunUsage,
     pub diagnostics: Vec<String>,
@@ -118,7 +118,8 @@ pub enum EventKind {
     ShellDecision,
     StepStarted,
     StepCompleted,
-    EffectApplied,
+    EffectProposed,
+    EffectCommitted,
     CapabilityDenied,
     ChildRunCreated,
     ChildRunCompleted,
@@ -141,12 +142,39 @@ pub struct Effect {
     pub outputs: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectProposal {
+    pub summary: String,
+    pub messages: Vec<Message>,
+    pub outputs: Vec<String>,
+}
+
 impl Effect {
     pub fn empty(summary: impl Into<String>) -> Self {
         Self {
             summary: summary.into(),
             messages: Vec::new(),
             outputs: Vec::new(),
+        }
+    }
+}
+
+impl EffectProposal {
+    pub fn empty(summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            messages: Vec::new(),
+            outputs: Vec::new(),
+        }
+    }
+}
+
+impl From<EffectProposal> for Effect {
+    fn from(proposal: EffectProposal) -> Self {
+        Self {
+            summary: proposal.summary,
+            messages: proposal.messages,
+            outputs: proposal.outputs,
         }
     }
 }

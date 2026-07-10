@@ -1,4 +1,4 @@
-use axiom_spec::{CapabilityLease, Effect, RunSpec, RunState};
+use axiom_spec::{CapabilityLease, EffectProposal, RunSpec, RunState};
 
 use crate::{CapabilityContext, CapabilityRegistry};
 
@@ -10,7 +10,7 @@ pub trait CapabilityTransport {
         input: &str,
         run_spec: &RunSpec,
         run_state: &RunState,
-    ) -> Result<Effect, String>;
+    ) -> Result<EffectProposal, String>;
 }
 
 pub struct LocalTransport {
@@ -31,7 +31,7 @@ impl CapabilityTransport for LocalTransport {
         input: &str,
         run_spec: &RunSpec,
         run_state: &RunState,
-    ) -> Result<Effect, String> {
+    ) -> Result<EffectProposal, String> {
         invoke_with_registry(
             &self.registry,
             capability_leases,
@@ -61,7 +61,7 @@ impl CapabilityTransport for RemoteTransportMock {
         input: &str,
         run_spec: &RunSpec,
         run_state: &RunState,
-    ) -> Result<Effect, String> {
+    ) -> Result<EffectProposal, String> {
         invoke_with_registry(
             &self.registry,
             capability_leases,
@@ -80,7 +80,7 @@ fn invoke_with_registry(
     input: &str,
     run_spec: &RunSpec,
     run_state: &RunState,
-) -> Result<Effect, String> {
+) -> Result<EffectProposal, String> {
     if !CapabilityRegistry::allows(capability_leases, capability_id, "invoke") {
         return Err(format!("capability_denied:{capability_id}"));
     }

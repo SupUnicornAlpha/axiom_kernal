@@ -10,7 +10,7 @@ mod transport;
 
 pub use capability::{CapabilityContext, CapabilityDriver, CapabilityRegistry, StaticCapability};
 pub use eventbus::{EventBus, InMemoryEventBus};
-pub use eventlog::{JsonlEventLog, ReplaySummary};
+pub use eventlog::{EventJournal, JsonlEventLog, ReplaySummary};
 pub use kernel::{Kernel, KernelError, RunReport};
 pub use runstore::{MemoryRunStore, RunStore, RunStoreRecord};
 pub use scheduler::{QueueScheduler, Scheduler};
