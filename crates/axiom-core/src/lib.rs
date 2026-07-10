@@ -12,7 +12,7 @@ pub use capability::{CapabilityContext, CapabilityDriver, CapabilityRegistry, St
 pub use eventbus::{EventBus, InMemoryEventBus};
 pub use eventlog::{EventJournal, JsonlEventLog, ReplaySummary};
 pub use kernel::{Kernel, KernelError, RunReport};
-pub use runstore::{MemoryRunStore, RunStore, RunStoreRecord};
+pub use runstore::{FileRunStore, MemoryRunStore, RunStore, RunStoreRecord};
 pub use scheduler::{QueueScheduler, Scheduler};
 pub use shell::{
     AuditShell, CompositeShell, MinimalPolicyEngine, PolicyEngine, PolicyMiddleware, Shell,

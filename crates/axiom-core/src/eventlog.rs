@@ -6,6 +6,7 @@ use axiom_spec::{Event, EventKind};
 
 pub trait EventJournal: Send + Sync {
     fn append(&self, event: &Event) -> Result<(), String>;
+    fn load_after(&self, run_id: &str, sequence: u64) -> Result<Vec<Event>, String>;
 }
 
 #[derive(Clone, Debug)]
@@ -41,21 +42,30 @@ impl JsonlEventLog {
             .append(true)
             .open(&self.path)
             .map_err(|err| err.to_string())?;
-        let line = format!(
-            "{{\"run_id\":\"{}\",\"step_id\":{},\"kind\":\"{}\",\"detail\":\"{}\"}}\n",
-            escape(&event.run_id),
-            event
-                .step_id
-                .as_ref()
-                .map(|value| format!("\"{}\"", escape(value)))
-                .unwrap_or_else(|| "null".to_string()),
-            event_kind_name(&event.kind),
-            escape(&event.detail)
-        );
+        let mut line = serde_json::to_string(event).map_err(|err| err.to_string())?;
+        line.push('\n');
         file.write_all(line.as_bytes())
             .and_then(|_| file.flush())
             .and_then(|_| file.sync_data())
             .map_err(|err| err.to_string())
+    }
+
+    pub fn load_after(&self, run_id: &str, sequence: u64) -> Result<Vec<Event>, String> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = File::open(&self.path).map_err(|err| err.to_string())?;
+        let reader = BufReader::new(file);
+        let mut events = Vec::new();
+        for line in reader.lines() {
+            let line = line.map_err(|err| err.to_string())?;
+            let event: Event = serde_json::from_str(&line).map_err(|err| err.to_string())?;
+            if event.run_id == run_id && event.sequence > sequence {
+                events.push(event);
+            }
+        }
+        events.sort_by_key(|event| event.sequence);
+        Ok(events)
     }
 
     pub fn replay_summary(&self) -> Result<ReplaySummary, String> {
@@ -77,11 +87,11 @@ impl JsonlEventLog {
         for line in reader.lines() {
             let line = line.map_err(|err| err.to_string())?;
             total_events += 1;
-            if line.contains("\"kind\":\"RunCompleted\"") {
-                completed_runs += 1;
-            }
-            if line.contains("\"kind\":\"RunFailed\"") {
-                failed_runs += 1;
+            let event: Event = serde_json::from_str(&line).map_err(|err| err.to_string())?;
+            match event.kind {
+                EventKind::RunCompleted => completed_runs += 1,
+                EventKind::RunFailed => failed_runs += 1,
+                _ => {}
             }
         }
 
@@ -107,10 +117,7 @@ impl JsonlEventLog {
 
         for line in reader.lines() {
             let line = line.map_err(|err| err.to_string())?;
-            if line.starts_with("{\"run_id\":\"")
-                && line.contains("\"kind\":\"")
-                && line.ends_with('}')
-            {
+            if serde_json::from_str::<Event>(&line).is_ok() {
                 valid_lines += 1;
             } else {
                 invalid_lines += 1;
@@ -128,29 +135,8 @@ impl EventJournal for JsonlEventLog {
     fn append(&self, event: &Event) -> Result<(), String> {
         JsonlEventLog::append(self, event)
     }
-}
 
-fn event_kind_name(kind: &EventKind) -> &'static str {
-    match kind {
-        EventKind::RunCreated => "RunCreated",
-        EventKind::RunStarted => "RunStarted",
-        EventKind::StepProposed => "StepProposed",
-        EventKind::ShellDecision => "ShellDecision",
-        EventKind::StepStarted => "StepStarted",
-        EventKind::StepCompleted => "StepCompleted",
-        EventKind::EffectProposed => "EffectProposed",
-        EventKind::EffectCommitted => "EffectCommitted",
-        EventKind::CapabilityDenied => "CapabilityDenied",
-        EventKind::ChildRunCreated => "ChildRunCreated",
-        EventKind::ChildRunCompleted => "ChildRunCompleted",
-        EventKind::RunCompleted => "RunCompleted",
-        EventKind::RunFailed => "RunFailed",
+    fn load_after(&self, run_id: &str, sequence: u64) -> Result<Vec<Event>, String> {
+        JsonlEventLog::load_after(self, run_id, sequence)
     }
-}
-
-fn escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
 }

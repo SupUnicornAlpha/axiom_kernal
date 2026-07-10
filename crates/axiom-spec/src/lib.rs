@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 pub type MetadataMap = BTreeMap<String, String>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSpec {
+    pub schema_version: u32,
     pub run_id: String,
     pub name: String,
     pub namespace: RunNamespace,
@@ -13,31 +17,32 @@ pub struct RunSpec {
     pub metadata: MetadataMap,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunNamespace {
     pub workspace_root: String,
     pub visible_capabilities: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetGroup {
     pub max_steps: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityLease {
     pub capability_id: String,
     pub permissions: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
     pub title: String,
     pub action: StepAction,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StepAction {
     Message {
         role: String,
@@ -53,7 +58,7 @@ pub enum StepAction {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildRunSpec {
     pub parent_run_id: String,
     pub run: RunSpec,
@@ -62,7 +67,7 @@ pub struct ChildRunSpec {
     pub return_contract: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildRunResult {
     pub run_id: String,
     pub status: RunStatus,
@@ -74,19 +79,20 @@ pub struct ChildRunResult {
     pub diagnostics: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunUsage {
     pub steps: usize,
     pub events: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MergeMode {
     SummaryOnly,
     AppendMessages,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
     pub status: RunStatus,
@@ -96,13 +102,14 @@ pub struct RunState {
     pub denied_actions: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Ready,
     Running,
@@ -110,7 +117,7 @@ pub enum RunStatus {
     Failed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
     RunCreated,
     RunStarted,
@@ -127,22 +134,29 @@ pub enum EventKind {
     RunFailed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
+    pub schema_version: u32,
     pub run_id: String,
     pub step_id: Option<String>,
     pub kind: EventKind,
     pub detail: String,
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub spec_digest: String,
+    pub causation_id: Option<String>,
+    pub commit_id: Option<String>,
+    pub effect: Option<Effect>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Effect {
     pub summary: String,
     pub messages: Vec<Message>,
     pub outputs: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectProposal {
     pub summary: String,
     pub messages: Vec<Message>,
@@ -169,6 +183,29 @@ impl EffectProposal {
     }
 }
 
+impl Event {
+    pub fn new(
+        run_id: impl Into<String>,
+        step_id: Option<String>,
+        kind: EventKind,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            run_id: run_id.into(),
+            step_id,
+            kind,
+            detail: detail.into(),
+            sequence: 0,
+            timestamp_ms: 0,
+            spec_digest: String::new(),
+            causation_id: None,
+            commit_id: None,
+            effect: None,
+        }
+    }
+}
+
 impl From<EffectProposal> for Effect {
     fn from(proposal: EffectProposal) -> Self {
         Self {
@@ -182,6 +219,7 @@ impl From<EffectProposal> for Effect {
 impl RunSpec {
     pub fn new(run_id: impl Into<String>, name: impl Into<String>, steps: Vec<Step>) -> Self {
         Self {
+            schema_version: 1,
             run_id: run_id.into(),
             name: name.into(),
             namespace: RunNamespace {
@@ -193,6 +231,12 @@ impl RunSpec {
             steps,
             metadata: MetadataMap::new(),
         }
+    }
+
+    pub fn digest(&self) -> String {
+        let bytes = serde_json::to_vec(self).expect("RunSpec serialization must succeed");
+        let digest = Sha256::digest(bytes);
+        format!("{digest:x}")
     }
 }
 

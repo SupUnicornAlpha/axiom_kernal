@@ -16,9 +16,17 @@ export type StepAction =
     }
   | {
       kind: "delegate"
-      child: RunSpec
+      child: ChildRunSpec
       merge_mode: "summary_only" | "append_messages"
     }
+
+export type ChildRunSpec = {
+  parent_run_id: string
+  run: RunSpec
+  memory_view: string[]
+  sandbox_profile: string
+  return_contract: string
+}
 
 export type Step = {
   id: string
@@ -27,6 +35,7 @@ export type Step = {
 }
 
 export type RunSpec = {
+  schema_version: 1
   run_id: string
   name: string
   namespace: {
@@ -46,6 +55,7 @@ export class RunSpecBuilder {
 
   constructor(runId: string, name: string) {
     this.spec = {
+      schema_version: 1,
       run_id: runId,
       name,
       namespace: {
@@ -116,7 +126,13 @@ export class RunSpecBuilder {
       title,
       action: {
         kind: "delegate",
-        child,
+        child: {
+          parent_run_id: this.spec.run_id,
+          run: child,
+          memory_view: [],
+          sandbox_profile: "default-deny",
+          return_contract: "effect-proposals-v1",
+        },
         merge_mode: mergeMode,
       },
     })

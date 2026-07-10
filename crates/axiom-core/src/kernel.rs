@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axiom_spec::{
     Effect, EffectProposal, Event, EventKind, MergeMode, Message, RunSpec, RunState, RunStatus,
@@ -25,6 +27,12 @@ pub enum KernelError {
 pub struct RunReport {
     pub state: RunState,
     pub events: Vec<Event>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CommitCursor {
+    last_sequence: u64,
+    applied_commit_ids: BTreeSet<String>,
 }
 
 pub struct Kernel<S, H, T, R = LocalSubRunTransport> {
@@ -97,55 +105,92 @@ where
     }
 
     pub fn run(&self, spec: &RunSpec) -> Result<RunReport, KernelError> {
-        self.run_from_state(spec, RunState::from_spec(spec), false)
+        self.run_from_state(
+            spec,
+            RunState::from_spec(spec),
+            CommitCursor::default(),
+            false,
+        )
     }
 
     pub fn resume(&self, spec: &RunSpec) -> Result<RunReport, KernelError> {
-        let checkpoint = self
+        let mut checkpoint = self
             .run_store
             .get(&spec.run_id)
             .map_err(KernelError::RunStore)?
             .ok_or_else(|| KernelError::MissingCheckpoint(spec.run_id.clone()))?;
-        self.run_from_state(spec, checkpoint.state, true)
+        let spec_digest = spec.digest();
+        if checkpoint.spec_digest != spec_digest {
+            return Err(KernelError::RunStore(format!(
+                "checkpoint_spec_digest_mismatch:{}:{}",
+                checkpoint.spec_digest, spec_digest
+            )));
+        }
+        if checkpoint.checkpoint_version != 1 {
+            return Err(KernelError::RunStore(format!(
+                "unsupported_checkpoint_version:{}",
+                checkpoint.checkpoint_version
+            )));
+        }
+        let recovered_events = self.recover_from_journal(spec, &mut checkpoint)?;
+        self.run_store
+            .put(checkpoint.clone())
+            .map_err(KernelError::RunStore)?;
+        if checkpoint.state.status == RunStatus::Completed {
+            return Ok(RunReport {
+                state: checkpoint.state,
+                events: recovered_events,
+            });
+        }
+        self.run_from_state(
+            spec,
+            checkpoint.state,
+            CommitCursor {
+                last_sequence: checkpoint.last_sequence,
+                applied_commit_ids: checkpoint.applied_commit_ids,
+            },
+            true,
+        )
     }
 
     fn run_from_state(
         &self,
         spec: &RunSpec,
         mut state: RunState,
+        mut cursor: CommitCursor,
         resumed: bool,
     ) -> Result<RunReport, KernelError> {
         let mut events = Vec::new();
         let mut event_bus = InMemoryEventBus::new();
+        let spec_digest = spec.digest();
 
         if !resumed {
             self.push_event(
                 &mut events,
                 &mut event_bus,
-                Event {
-                    run_id: spec.run_id.clone(),
-                    step_id: None,
-                    kind: EventKind::RunCreated,
-                    detail: spec.name.clone(),
-                },
+                &mut cursor,
+                &spec_digest,
+                Event::new(&spec.run_id, None, EventKind::RunCreated, &spec.name),
             )?;
         }
         state.status = RunStatus::Running;
         self.push_event(
             &mut events,
             &mut event_bus,
-            Event {
-                run_id: spec.run_id.clone(),
-                step_id: None,
-                kind: EventKind::RunStarted,
-                detail: if resumed {
+            &mut cursor,
+            &spec_digest,
+            Event::new(
+                &spec.run_id,
+                None,
+                EventKind::RunStarted,
+                if resumed {
                     "kernel_resumed".to_string()
                 } else {
                     "kernel_started".to_string()
                 },
-            },
+            ),
         )?;
-        self.checkpoint(&state)?;
+        self.checkpoint(&state, &spec_digest, &cursor)?;
 
         while let Some(original_step) = self.scheduler.next(spec, state.next_step_index) {
             if state.next_step_index >= spec.budget.max_steps {
@@ -154,26 +199,30 @@ where
                 self.push_event(
                     &mut events,
                     &mut event_bus,
-                    Event {
-                        run_id: spec.run_id.clone(),
-                        step_id: Some(original_step.id.clone()),
-                        kind: EventKind::RunFailed,
-                        detail: detail.clone(),
-                    },
+                    &mut cursor,
+                    &spec_digest,
+                    Event::new(
+                        &spec.run_id,
+                        Some(original_step.id.clone()),
+                        EventKind::RunFailed,
+                        detail.clone(),
+                    ),
                 )?;
-                self.checkpoint(&state)?;
+                self.checkpoint(&state, &spec_digest, &cursor)?;
                 return Err(KernelError::BudgetExceeded(detail));
             }
 
             self.push_event(
                 &mut events,
                 &mut event_bus,
-                Event {
-                    run_id: spec.run_id.clone(),
-                    step_id: Some(original_step.id.clone()),
-                    kind: EventKind::StepProposed,
-                    detail: original_step.title.clone(),
-                },
+                &mut cursor,
+                &spec_digest,
+                Event::new(
+                    &spec.run_id,
+                    Some(original_step.id.clone()),
+                    EventKind::StepProposed,
+                    &original_step.title,
+                ),
             )?;
 
             let step = match self.shell.before_step(spec, &state, original_step) {
@@ -181,12 +230,14 @@ where
                     self.push_event(
                         &mut events,
                         &mut event_bus,
-                        Event {
-                            run_id: spec.run_id.clone(),
-                            step_id: Some(original_step.id.clone()),
-                            kind: EventKind::ShellDecision,
-                            detail: "allow".to_string(),
-                        },
+                        &mut cursor,
+                        &spec_digest,
+                        Event::new(
+                            &spec.run_id,
+                            Some(original_step.id.clone()),
+                            EventKind::ShellDecision,
+                            "allow",
+                        ),
                     )?;
                     original_step.clone()
                 }
@@ -194,12 +245,14 @@ where
                     self.push_event(
                         &mut events,
                         &mut event_bus,
-                        Event {
-                            run_id: spec.run_id.clone(),
-                            step_id: Some(original_step.id.clone()),
-                            kind: EventKind::ShellDecision,
-                            detail: format!("rewrite:{reason}"),
-                        },
+                        &mut cursor,
+                        &spec_digest,
+                        Event::new(
+                            &spec.run_id,
+                            Some(original_step.id.clone()),
+                            EventKind::ShellDecision,
+                            format!("rewrite:{reason}"),
+                        ),
                     )?;
                     new_step
                 }
@@ -208,15 +261,17 @@ where
                     self.push_event(
                         &mut events,
                         &mut event_bus,
-                        Event {
-                            run_id: spec.run_id.clone(),
-                            step_id: Some(original_step.id.clone()),
-                            kind: EventKind::ShellDecision,
-                            detail: format!("deny:{reason}"),
-                        },
+                        &mut cursor,
+                        &spec_digest,
+                        Event::new(
+                            &spec.run_id,
+                            Some(original_step.id.clone()),
+                            EventKind::ShellDecision,
+                            format!("deny:{reason}"),
+                        ),
                     )?;
                     state.next_step_index += 1;
-                    self.checkpoint(&state)?;
+                    self.checkpoint(&state, &spec_digest, &cursor)?;
                     continue;
                 }
             };
@@ -224,64 +279,76 @@ where
             self.push_event(
                 &mut events,
                 &mut event_bus,
-                Event {
-                    run_id: spec.run_id.clone(),
-                    step_id: Some(step.id.clone()),
-                    kind: EventKind::StepStarted,
-                    detail: step.title.clone(),
-                },
+                &mut cursor,
+                &spec_digest,
+                Event::new(
+                    &spec.run_id,
+                    Some(step.id.clone()),
+                    EventKind::StepStarted,
+                    &step.title,
+                ),
             )?;
 
-            let proposal = self.execute_step(spec, &state, &step, &mut events)?;
+            let proposal =
+                self.execute_step(spec, &state, &step, &mut events, &mut cursor, &spec_digest)?;
             self.push_event(
                 &mut events,
                 &mut event_bus,
-                Event {
-                    run_id: spec.run_id.clone(),
-                    step_id: Some(step.id.clone()),
-                    kind: EventKind::StepCompleted,
-                    detail: proposal.summary.clone(),
-                },
+                &mut cursor,
+                &spec_digest,
+                Event::new(
+                    &spec.run_id,
+                    Some(step.id.clone()),
+                    EventKind::StepCompleted,
+                    &proposal.summary,
+                ),
             )?;
             self.push_event(
                 &mut events,
                 &mut event_bus,
-                Event {
-                    run_id: spec.run_id.clone(),
-                    step_id: Some(step.id.clone()),
-                    kind: EventKind::EffectProposed,
-                    detail: proposal.summary.clone(),
-                },
+                &mut cursor,
+                &spec_digest,
+                Event::new(
+                    &spec.run_id,
+                    Some(step.id.clone()),
+                    EventKind::EffectProposed,
+                    &proposal.summary,
+                ),
             )?;
             let effect: Effect = proposal.into();
+            let commit_id = format!("{}:{}:{}", spec.run_id, step.id, spec_digest);
+            let mut committed_event = Event::new(
+                &spec.run_id,
+                Some(step.id.clone()),
+                EventKind::EffectCommitted,
+                &effect.summary,
+            );
+            committed_event.commit_id = Some(commit_id.clone());
+            committed_event.effect = Some(effect.clone());
             self.push_event(
                 &mut events,
                 &mut event_bus,
-                Event {
-                    run_id: spec.run_id.clone(),
-                    step_id: Some(step.id.clone()),
-                    kind: EventKind::EffectCommitted,
-                    detail: effect.summary.clone(),
-                },
+                &mut cursor,
+                &spec_digest,
+                committed_event,
             )?;
-            apply_effect(&mut state, effect);
+            if cursor.applied_commit_ids.insert(commit_id) {
+                apply_effect(&mut state, effect);
+            }
 
             state.next_step_index += 1;
-            self.checkpoint(&state)?;
+            self.checkpoint(&state, &spec_digest, &cursor)?;
         }
 
         self.push_event(
             &mut events,
             &mut event_bus,
-            Event {
-                run_id: spec.run_id.clone(),
-                step_id: None,
-                kind: EventKind::RunCompleted,
-                detail: "ok".to_string(),
-            },
+            &mut cursor,
+            &spec_digest,
+            Event::new(&spec.run_id, None, EventKind::RunCompleted, "ok"),
         )?;
         state.status = RunStatus::Completed;
-        self.checkpoint(&state)?;
+        self.checkpoint(&state, &spec_digest, &cursor)?;
 
         let _ = event_bus.snapshot();
 
@@ -294,6 +361,8 @@ where
         state: &RunState,
         step: &Step,
         events: &mut Vec<Event>,
+        cursor: &mut CommitCursor,
+        spec_digest: &str,
     ) -> Result<EffectProposal, KernelError> {
         match &step.action {
             StepAction::Message { role, content } => Ok(EffectProposal {
@@ -320,12 +389,14 @@ where
                         self.push_event(
                             events,
                             &mut InMemoryEventBus::new(),
-                            Event {
-                                run_id: spec.run_id.clone(),
-                                step_id: Some(step.id.clone()),
-                                kind: EventKind::CapabilityDenied,
-                                detail: detail.clone(),
-                            },
+                            cursor,
+                            spec_digest,
+                            Event::new(
+                                &spec.run_id,
+                                Some(step.id.clone()),
+                                EventKind::CapabilityDenied,
+                                detail.clone(),
+                            ),
                         )?;
                         Err(KernelError::Denied(detail))
                     } else {
@@ -338,24 +409,28 @@ where
                     self.push_event(
                         events,
                         &mut InMemoryEventBus::new(),
-                        Event {
-                            run_id: spec.run_id.clone(),
-                            step_id: Some(step.id.clone()),
-                            kind: EventKind::CapabilityDenied,
-                            detail: detail.clone(),
-                        },
+                        cursor,
+                        spec_digest,
+                        Event::new(
+                            &spec.run_id,
+                            Some(step.id.clone()),
+                            EventKind::CapabilityDenied,
+                            detail.clone(),
+                        ),
                     )?;
                     return Err(KernelError::Denied(detail));
                 }
                 self.push_event(
                     events,
                     &mut InMemoryEventBus::new(),
-                    Event {
-                        run_id: spec.run_id.clone(),
-                        step_id: Some(step.id.clone()),
-                        kind: EventKind::ChildRunCreated,
-                        detail: child.run.run_id.clone(),
-                    },
+                    cursor,
+                    spec_digest,
+                    Event::new(
+                        &spec.run_id,
+                        Some(step.id.clone()),
+                        EventKind::ChildRunCreated,
+                        &child.run.run_id,
+                    ),
                 )?;
                 let child_result = self
                     .subrun_transport
@@ -363,15 +438,17 @@ where
                 self.push_event(
                     events,
                     &mut InMemoryEventBus::new(),
-                    Event {
-                        run_id: spec.run_id.clone(),
-                        step_id: Some(step.id.clone()),
-                        kind: EventKind::ChildRunCompleted,
-                        detail: format!(
+                    cursor,
+                    spec_digest,
+                    Event::new(
+                        &spec.run_id,
+                        Some(step.id.clone()),
+                        EventKind::ChildRunCompleted,
+                        format!(
                             "{}:{:?}:{}",
                             child_result.run_id, child_result.status, child_result.events_digest
                         ),
-                    },
+                    ),
                 )?;
 
                 let mut proposal =
@@ -400,23 +477,109 @@ where
         &self,
         events: &mut Vec<Event>,
         event_bus: &mut dyn EventBus,
-        event: Event,
+        cursor: &mut CommitCursor,
+        spec_digest: &str,
+        mut event: Event,
     ) -> Result<(), KernelError> {
+        let next_sequence = cursor.last_sequence + 1;
+        event.sequence = next_sequence;
+        event.timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| KernelError::EventLog(err.to_string()))?
+            .as_millis() as u64;
+        event.spec_digest = spec_digest.to_string();
+        event.causation_id = (cursor.last_sequence > 0)
+            .then(|| format!("{}:{}", event.run_id, cursor.last_sequence));
         if let Some(event_log) = &self.event_log {
             event_log.append(&event).map_err(KernelError::EventLog)?;
         }
+        cursor.last_sequence = next_sequence;
         event_bus.publish(event.clone());
         events.push(event);
         Ok(())
     }
 
-    fn checkpoint(&self, state: &RunState) -> Result<(), KernelError> {
+    fn checkpoint(
+        &self,
+        state: &RunState,
+        spec_digest: &str,
+        cursor: &CommitCursor,
+    ) -> Result<(), KernelError> {
         self.run_store
             .put(RunStoreRecord {
+                checkpoint_version: 1,
                 run_id: state.run_id.clone(),
+                spec_digest: spec_digest.to_string(),
+                last_sequence: cursor.last_sequence,
+                applied_commit_ids: cursor.applied_commit_ids.clone(),
                 state: state.clone(),
             })
             .map_err(KernelError::RunStore)
+    }
+
+    fn recover_from_journal(
+        &self,
+        spec: &RunSpec,
+        checkpoint: &mut RunStoreRecord,
+    ) -> Result<Vec<Event>, KernelError> {
+        let Some(event_log) = &self.event_log else {
+            return Ok(Vec::new());
+        };
+        let events = event_log
+            .load_after(&spec.run_id, checkpoint.last_sequence)
+            .map_err(KernelError::EventLog)?;
+        for event in &events {
+            if event.schema_version != 1 {
+                return Err(KernelError::EventLog(format!(
+                    "unsupported_event_version:{}",
+                    event.schema_version
+                )));
+            }
+            if event.spec_digest != checkpoint.spec_digest {
+                return Err(KernelError::EventLog(format!(
+                    "event_spec_digest_mismatch:{}:{}",
+                    event.spec_digest, checkpoint.spec_digest
+                )));
+            }
+            if event.sequence != checkpoint.last_sequence + 1 {
+                return Err(KernelError::EventLog(format!(
+                    "event_sequence_gap:{}:{}",
+                    checkpoint.last_sequence, event.sequence
+                )));
+            }
+            match event.kind {
+                EventKind::EffectCommitted => {
+                    let commit_id = event.commit_id.as_ref().ok_or_else(|| {
+                        KernelError::EventLog("committed_effect_missing_commit_id".to_string())
+                    })?;
+                    if checkpoint.applied_commit_ids.insert(commit_id.clone()) {
+                        let effect = event.effect.clone().ok_or_else(|| {
+                            KernelError::EventLog("committed_effect_missing_payload".to_string())
+                        })?;
+                        apply_effect(&mut checkpoint.state, effect);
+                        let step_id = event.step_id.as_ref().ok_or_else(|| {
+                            KernelError::EventLog("committed_effect_missing_step_id".to_string())
+                        })?;
+                        let step_index = spec
+                            .steps
+                            .iter()
+                            .position(|step| &step.id == step_id)
+                            .ok_or_else(|| {
+                                KernelError::EventLog(format!(
+                                    "committed_effect_unknown_step:{step_id}"
+                                ))
+                            })?;
+                        checkpoint.state.next_step_index =
+                            checkpoint.state.next_step_index.max(step_index + 1);
+                    }
+                }
+                EventKind::RunCompleted => checkpoint.state.status = RunStatus::Completed,
+                EventKind::RunFailed => checkpoint.state.status = RunStatus::Failed,
+                _ => {}
+            }
+            checkpoint.last_sequence = event.sequence;
+        }
+        Ok(events)
     }
 }
 

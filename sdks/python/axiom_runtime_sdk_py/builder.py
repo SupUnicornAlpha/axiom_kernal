@@ -4,6 +4,7 @@ from copy import deepcopy
 class RunSpecBuilder:
     def __init__(self, run_id: str, name: str):
         self.spec = {
+            "schema_version": 1,
             "run_id": run_id,
             "name": name,
             "namespace": {
@@ -74,7 +75,13 @@ class RunSpecBuilder:
                 "title": title,
                 "action": {
                     "kind": "delegate",
-                    "child": child,
+                    "child": {
+                        "parent_run_id": self.spec["run_id"],
+                        "run": child,
+                        "memory_view": [],
+                        "sandbox_profile": "default-deny",
+                        "return_contract": "effect-proposals-v1",
+                    },
                     "merge_mode": merge_mode,
                 },
             }

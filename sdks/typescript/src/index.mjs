@@ -1,6 +1,7 @@
 export class RunSpecBuilder {
   constructor(runId, name) {
     this.spec = {
+      schema_version: 1,
       run_id: runId,
       name,
       namespace: {
@@ -71,7 +72,13 @@ export class RunSpecBuilder {
       title,
       action: {
         kind: "delegate",
-        child,
+        child: {
+          parent_run_id: this.spec.run_id,
+          run: child,
+          memory_view: [],
+          sandbox_profile: "default-deny",
+          return_contract: "effect-proposals-v1",
+        },
         merge_mode: mergeMode,
       },
     })
