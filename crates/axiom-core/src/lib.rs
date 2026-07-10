@@ -13,5 +13,8 @@ pub use eventlog::{JsonlEventLog, ReplaySummary};
 pub use kernel::{Kernel, KernelError, RunReport};
 pub use runstore::{MemoryRunStore, RunStore, RunStoreRecord};
 pub use scheduler::{QueueScheduler, Scheduler};
-pub use shell::{AuditShell, Shell, ShellDecision};
+pub use shell::{
+    AuditShell, CompositeShell, MinimalPolicyEngine, PolicyEngine, PolicyMiddleware, Shell,
+    ShellDecision, ShellMiddleware, TitlePolicyMiddleware,
+};
 pub use transport::{CapabilityTransport, LocalTransport, RemoteTransportMock};
