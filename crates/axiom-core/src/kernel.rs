@@ -3,8 +3,8 @@ use axiom_spec::{
 };
 
 use crate::{
-    CapabilityRegistry, CapabilityTransport, EventBus, InMemoryEventBus, JsonlEventLog, RunStore,
-    RunStoreRecord, Scheduler, Shell, ShellDecision,
+    CapabilityTransport, EventBus, InMemoryEventBus, JsonlEventLog, LocalSubRunTransport, RunStore,
+    RunStoreRecord, Scheduler, Shell, ShellDecision, SubRunTransport,
 };
 
 #[derive(Debug)]
@@ -20,29 +20,50 @@ pub struct RunReport {
     pub events: Vec<Event>,
 }
 
-pub struct Kernel<S, H, T> {
+pub struct Kernel<S, H, T, R = LocalSubRunTransport> {
     scheduler: S,
     shell: H,
     transport: T,
+    subrun_transport: R,
     event_log: Option<JsonlEventLog>,
 }
 
-impl<S, H, T> Kernel<S, H, T>
+impl<S, H, T> Kernel<S, H, T, LocalSubRunTransport>
 where
     S: Scheduler,
     H: Shell,
     T: CapabilityTransport,
 {
-    pub fn new(
+    pub fn new(scheduler: S, shell: H, transport: T, event_log: Option<JsonlEventLog>) -> Self {
+        Self {
+            scheduler,
+            shell,
+            transport,
+            subrun_transport: LocalSubRunTransport,
+            event_log,
+        }
+    }
+}
+
+impl<S, H, T, R> Kernel<S, H, T, R>
+where
+    S: Scheduler,
+    H: Shell,
+    T: CapabilityTransport,
+    R: SubRunTransport,
+{
+    pub fn with_subrun_transport(
         scheduler: S,
         shell: H,
         transport: T,
+        subrun_transport: R,
         event_log: Option<JsonlEventLog>,
     ) -> Self {
         Self {
             scheduler,
             shell,
             transport,
+            subrun_transport,
             event_log,
         }
     }
@@ -226,33 +247,11 @@ where
             StepAction::CapabilityInvoke {
                 capability_id,
                 input,
-            } => {
-                self.transport
-                    .invoke(&spec.capability_leases, capability_id, input, spec, state)
-                    .map_err(|detail| {
-                        if detail.starts_with("capability_denied:") {
-                            self.push_event(
-                                events,
-                                &mut InMemoryEventBus::new(),
-                                Event {
-                                    run_id: spec.run_id.clone(),
-                                    step_id: Some(step.id.clone()),
-                                    kind: EventKind::CapabilityDenied,
-                                    detail: detail.clone(),
-                                },
-                            );
-                            KernelError::Denied(detail)
-                        } else {
-                            KernelError::Capability(detail)
-                        }
-                    })
-            }
-            StepAction::Delegate { child, merge_mode } => {
-                for child_lease in &child.capability_leases {
-                    if !CapabilityRegistry::is_leased(&spec.capability_leases, &child_lease.capability_id)
-                    {
-                        let detail =
-                            format!("child_capability_not_delegated:{}", child_lease.capability_id);
+            } => self
+                .transport
+                .invoke(&spec.capability_leases, capability_id, input, spec, state)
+                .map_err(|detail| {
+                    if detail.starts_with("capability_denied:") {
                         self.push_event(
                             events,
                             &mut InMemoryEventBus::new(),
@@ -263,8 +262,24 @@ where
                                 detail: detail.clone(),
                             },
                         );
-                        return Err(KernelError::Denied(detail));
+                        KernelError::Denied(detail)
+                    } else {
+                        KernelError::Capability(detail)
                     }
+                }),
+            StepAction::Delegate { child, merge_mode } => {
+                if let Err(detail) = validate_child_run(spec, child) {
+                    self.push_event(
+                        events,
+                        &mut InMemoryEventBus::new(),
+                        Event {
+                            run_id: spec.run_id.clone(),
+                            step_id: Some(step.id.clone()),
+                            kind: EventKind::CapabilityDenied,
+                            detail: detail.clone(),
+                        },
+                    );
+                    return Err(KernelError::Denied(detail));
                 }
                 self.push_event(
                     events,
@@ -273,10 +288,12 @@ where
                         run_id: spec.run_id.clone(),
                         step_id: Some(step.id.clone()),
                         kind: EventKind::ChildRunCreated,
-                        detail: child.run_id.clone(),
+                        detail: child.run.run_id.clone(),
                     },
                 );
-                let child_report = self.run(child)?;
+                let child_result = self
+                    .subrun_transport
+                    .execute(child, &|child_spec| self.run(child_spec))?;
                 self.push_event(
                     events,
                     &mut InMemoryEventBus::new(),
@@ -284,22 +301,27 @@ where
                         run_id: spec.run_id.clone(),
                         step_id: Some(step.id.clone()),
                         kind: EventKind::ChildRunCompleted,
-                        detail: format!("{}:{:?}", child.run_id, child_report.state.status),
+                        detail: format!(
+                            "{}:{:?}:{}",
+                            child_result.run_id, child_result.status, child_result.events_digest
+                        ),
                     },
                 );
 
-                let mut effect = Effect::empty(format!("child_run:{}", child.run_id));
+                let mut effect = Effect::empty(format!("child_run:{}", child_result.run_id));
                 match merge_mode {
                     MergeMode::SummaryOnly => {
                         effect.outputs.push(format!(
-                            "child_summary:{}:{} outputs",
-                            child.run_id,
-                            child_report.state.outputs.len()
+                            "child_summary:{}:{} proposed_effects",
+                            child_result.run_id,
+                            child_result.proposed_effects.len()
                         ));
                     }
                     MergeMode::AppendMessages => {
-                        effect.messages.extend(child_report.state.messages);
-                        effect.outputs.extend(child_report.state.outputs);
+                        for proposed_effect in child_result.proposed_effects {
+                            effect.messages.extend(proposed_effect.messages);
+                            effect.outputs.extend(proposed_effect.outputs);
+                        }
                     }
                 }
                 Ok(effect)
@@ -314,6 +336,61 @@ where
         event_bus.publish(event.clone());
         events.push(event);
     }
+}
+
+fn validate_child_run(parent: &RunSpec, child: &axiom_spec::ChildRunSpec) -> Result<(), String> {
+    if child.parent_run_id != parent.run_id {
+        return Err(format!(
+            "child_parent_mismatch:{}:{}",
+            child.parent_run_id, parent.run_id
+        ));
+    }
+    if child.run.budget.max_steps > parent.budget.max_steps {
+        return Err(format!(
+            "child_budget_exceeds_parent:{}:{}",
+            child.run.budget.max_steps, parent.budget.max_steps
+        ));
+    }
+    if !std::path::Path::new(&child.run.namespace.workspace_root)
+        .starts_with(std::path::Path::new(&parent.namespace.workspace_root))
+    {
+        return Err(format!(
+            "child_namespace_outside_parent:{}",
+            child.run.namespace.workspace_root
+        ));
+    }
+    for capability_id in &child.run.namespace.visible_capabilities {
+        if !parent
+            .namespace
+            .visible_capabilities
+            .contains(capability_id)
+        {
+            return Err(format!(
+                "child_namespace_capability_not_visible:{capability_id}"
+            ));
+        }
+    }
+    for child_lease in &child.run.capability_leases {
+        let Some(parent_lease) = parent
+            .capability_leases
+            .iter()
+            .find(|lease| lease.capability_id == child_lease.capability_id)
+        else {
+            return Err(format!(
+                "child_capability_not_delegated:{}",
+                child_lease.capability_id
+            ));
+        };
+        for permission in &child_lease.permissions {
+            if !parent_lease.permissions.contains(permission) {
+                return Err(format!(
+                    "child_permission_not_delegated:{}:{}",
+                    child_lease.capability_id, permission
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_effect(state: &mut RunState, effect: Effect) {

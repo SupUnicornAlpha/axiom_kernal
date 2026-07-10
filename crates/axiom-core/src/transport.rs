@@ -81,7 +81,7 @@ fn invoke_with_registry(
     run_spec: &RunSpec,
     run_state: &RunState,
 ) -> Result<Effect, String> {
-    if !CapabilityRegistry::is_leased(capability_leases, capability_id) {
+    if !CapabilityRegistry::allows(capability_leases, capability_id, "invoke") {
         return Err(format!("capability_denied:{capability_id}"));
     }
 

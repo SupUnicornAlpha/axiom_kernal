@@ -78,4 +78,11 @@ impl CapabilityRegistry {
             .iter()
             .any(|lease| lease.capability_id == capability_id)
     }
+
+    pub fn allows(leasable: &[CapabilityLease], capability_id: &str, permission: &str) -> bool {
+        leasable.iter().any(|lease| {
+            lease.capability_id == capability_id
+                && lease.permissions.iter().any(|value| value == permission)
+        })
+    }
 }

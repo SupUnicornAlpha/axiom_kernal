@@ -48,9 +48,36 @@ pub enum StepAction {
         input: String,
     },
     Delegate {
-        child: Box<RunSpec>,
+        child: Box<ChildRunSpec>,
         merge_mode: MergeMode,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildRunSpec {
+    pub parent_run_id: String,
+    pub run: RunSpec,
+    pub memory_view: Vec<String>,
+    pub sandbox_profile: String,
+    pub return_contract: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildRunResult {
+    pub run_id: String,
+    pub status: RunStatus,
+    pub summary: String,
+    pub artifacts: Vec<String>,
+    pub proposed_effects: Vec<Effect>,
+    pub events_digest: String,
+    pub usage: RunUsage,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunUsage {
+    pub steps: usize,
+    pub events: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +164,18 @@ impl RunSpec {
             capability_leases: Vec::new(),
             steps,
             metadata: MetadataMap::new(),
+        }
+    }
+}
+
+impl ChildRunSpec {
+    pub fn new(parent_run_id: impl Into<String>, run: RunSpec) -> Self {
+        Self {
+            parent_run_id: parent_run_id.into(),
+            run,
+            memory_view: Vec::new(),
+            sandbox_profile: "default-deny".to_string(),
+            return_contract: "effect-proposals-v1".to_string(),
         }
     }
 }

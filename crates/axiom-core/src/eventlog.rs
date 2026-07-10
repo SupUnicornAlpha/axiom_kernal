@@ -48,7 +48,8 @@ impl JsonlEventLog {
             event_kind_name(&event.kind),
             escape(&event.detail)
         );
-        file.write_all(line.as_bytes()).map_err(|err| err.to_string())
+        file.write_all(line.as_bytes())
+            .map_err(|err| err.to_string())
     }
 
     pub fn replay_summary(&self) -> Result<ReplaySummary, String> {
