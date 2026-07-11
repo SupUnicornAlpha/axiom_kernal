@@ -31,6 +31,135 @@ pub trait RunLeaseStore: Send + Sync {
     fn release(&self, lease: &WriterLease) -> Result<(), String>;
 }
 
+pub trait AtomicLeaseBackend: Send + Sync {
+    fn server_now_ms(&self) -> Result<u64, String>;
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+    fn compare_exchange(
+        &self,
+        key: &str,
+        expected: Option<&[u8]>,
+        value: &[u8],
+    ) -> Result<bool, String>;
+}
+
+#[derive(Clone)]
+pub struct DistributedRunLeaseStore<B> {
+    backend: B,
+    key_prefix: String,
+}
+pub type PostgresRunLeaseStore<B> = DistributedRunLeaseStore<B>;
+pub type EtcdRunLeaseStore<B> = DistributedRunLeaseStore<B>;
+
+impl<B> DistributedRunLeaseStore<B> {
+    pub fn new(backend: B, key_prefix: impl Into<String>) -> Self {
+        Self {
+            backend,
+            key_prefix: key_prefix.into(),
+        }
+    }
+    fn key(&self, run_id: &str) -> String {
+        format!("{}{}", self.key_prefix, run_id)
+    }
+}
+
+impl<B: AtomicLeaseBackend> DistributedRunLeaseStore<B> {
+    fn mutate<T>(
+        &self,
+        run_id: &str,
+        operation: impl Fn(Option<WriterLease>, u64) -> Result<(WriterLease, T), String>,
+    ) -> Result<T, String> {
+        let key = self.key(run_id);
+        for _ in 0..32 {
+            let current_bytes = self.backend.get(&key)?;
+            let current = current_bytes
+                .as_deref()
+                .map(serde_json::from_slice)
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            let (next, result) = operation(current, self.backend.server_now_ms()?)?;
+            let next_bytes = serde_json::to_vec(&next).map_err(|error| error.to_string())?;
+            if self
+                .backend
+                .compare_exchange(&key, current_bytes.as_deref(), &next_bytes)?
+            {
+                return Ok(result);
+            }
+        }
+        Err("distributed_lease_cas_contention".to_string())
+    }
+}
+
+impl<B: AtomicLeaseBackend> RunLeaseStore for DistributedRunLeaseStore<B> {
+    fn acquire(
+        &self,
+        run_id: &str,
+        holder_id: &str,
+        _worker_now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<WriterLease, String> {
+        self.mutate(run_id, |previous, now| {
+            if let Some(active) = &previous {
+                if active.expires_at_ms > now && active.holder_id != holder_id {
+                    return Err(format!(
+                        "writer_lease_held:{}:{}:{}",
+                        run_id, active.holder_id, active.epoch
+                    ));
+                }
+            }
+            let epoch = match previous {
+                Some(active) if active.holder_id == holder_id && active.expires_at_ms > now => {
+                    active.epoch
+                }
+                Some(active) => active.epoch + 1,
+                None => 1,
+            };
+            let lease = WriterLease {
+                run_id: run_id.to_string(),
+                holder_id: holder_id.to_string(),
+                epoch,
+                expires_at_ms: now.saturating_add(ttl_ms),
+            };
+            Ok((lease.clone(), lease))
+        })
+    }
+    fn renew(
+        &self,
+        lease: &WriterLease,
+        _worker_now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<WriterLease, String> {
+        self.mutate(&lease.run_id, |current, now| {
+            validate_current(current.as_ref(), lease, now)?;
+            let renewed = WriterLease {
+                expires_at_ms: now.saturating_add(ttl_ms),
+                ..lease.clone()
+            };
+            Ok((renewed.clone(), renewed))
+        })
+    }
+    fn validate(&self, lease: &WriterLease, _worker_now_ms: u64) -> Result<(), String> {
+        let current = self
+            .backend
+            .get(&self.key(&lease.run_id))?
+            .ok_or_else(|| format!("writer_lease_missing:{}", lease.run_id))?;
+        let current: WriterLease =
+            serde_json::from_slice(&current).map_err(|error| error.to_string())?;
+        validate_current(Some(&current), lease, self.backend.server_now_ms()?)
+    }
+    fn release(&self, lease: &WriterLease) -> Result<(), String> {
+        self.mutate(&lease.run_id, |current, now| {
+            validate_current(current.as_ref(), lease, now)?;
+            Ok((
+                WriterLease {
+                    expires_at_ms: 0,
+                    ..lease.clone()
+                },
+                (),
+            ))
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MemoryRunLeaseStore {
     leases: Arc<RwLock<BTreeMap<String, WriterLease>>>,
@@ -282,4 +411,50 @@ fn hex_id(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod distributed_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Clone, Default)]
+    struct Backend {
+        now: Arc<AtomicU64>,
+        values: Arc<RwLock<BTreeMap<String, Vec<u8>>>>,
+    }
+    impl AtomicLeaseBackend for Backend {
+        fn server_now_ms(&self) -> Result<u64, String> {
+            Ok(self.now.load(Ordering::SeqCst))
+        }
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.values.read().unwrap().get(key).cloned())
+        }
+        fn compare_exchange(
+            &self,
+            key: &str,
+            expected: Option<&[u8]>,
+            value: &[u8],
+        ) -> Result<bool, String> {
+            let mut values = self.values.write().unwrap();
+            if values.get(key).map(Vec::as_slice) != expected {
+                return Ok(false);
+            }
+            values.insert(key.to_string(), value.to_vec());
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn server_clock_fences_workers_with_clock_skew() {
+        let backend = Backend::default();
+        backend.now.store(1_000, Ordering::SeqCst);
+        let store = DistributedRunLeaseStore::new(backend.clone(), "lease/");
+        let first = store.acquire("run", "a", 9_999_999, 100).unwrap();
+        assert!(store.acquire("run", "b", 0, 100).is_err());
+        backend.now.store(1_101, Ordering::SeqCst);
+        let second = store.acquire("run", "b", 0, 100).unwrap();
+        assert_eq!(second.epoch, first.epoch + 1);
+        assert!(store.validate(&first, 99_999_999).is_err());
+    }
 }

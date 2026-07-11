@@ -17,12 +17,15 @@ pub use capability::{CapabilityContext, CapabilityDriver, CapabilityRegistry, St
 pub use drivers::{CliDriver, FilesystemDriver, FunctionDriver};
 pub use eventbus::{EventBus, InMemoryEventBus};
 pub use eventlog::{
-    EventJournal, JournalCompactionReport, JournalIntegrityReport, JournalRepairReport,
-    JsonlEventLog, ReplaySummary,
+    EventJournal, GenerationEventLog, GenerationReader, JournalCompactionReport,
+    JournalIntegrityReport, JournalRepairReport, JsonlEventLog, ReplaySummary,
 };
 pub use facade::{AllowWrap, WrapError, WrapHarness, WrapPolicy, WrapReport};
 pub use kernel::{Kernel, KernelError, RunReport};
-pub use lease::{FileRunLeaseStore, MemoryRunLeaseStore, RunLeaseStore, WriterLease};
+pub use lease::{
+    AtomicLeaseBackend, DistributedRunLeaseStore, EtcdRunLeaseStore, FileRunLeaseStore,
+    MemoryRunLeaseStore, PostgresRunLeaseStore, RunLeaseStore, WriterLease,
+};
 pub use migration::{
     migrate_checkpoint_file, migrate_checkpoint_json, migrate_event_json, migrate_event_log,
     validate_run_spec_version, CheckpointMigrationContext, EventMigrationContext, MigrationOutcome,

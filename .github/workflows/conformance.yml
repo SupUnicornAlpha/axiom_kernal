@@ -1,0 +1,11 @@
+name: conformance
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+      - run: node -e "JSON.parse(require('fs').readFileSync('spec/v1/axiom.schema.json'))"
+      - run: protoc --descriptor_set_out=/tmp/axiom.pb spec/v1/axiom.proto

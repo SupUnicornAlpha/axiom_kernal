@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://axiom.dev/spec/v1/axiom.schema.json",
+  "title": "Axiom Runtime Specification v1",
+  "$defs": {
+    "step": {
+      "type": "object",
+      "required": ["id", "title", "action"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "title": {"type": "string"},
+        "action": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["message", "capability_invoke", "delegate"]}}}
+      },
+      "additionalProperties": false
+    },
+    "runSpec": {
+      "type": "object",
+      "required": ["schema_version", "run_id", "name", "namespace", "budget", "capability_leases", "steps", "metadata"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "namespace": {"type": "object"},
+        "budget": {"type": "object", "required": ["max_steps"], "properties": {"max_steps": {"type": "integer", "minimum": 1}}},
+        "capability_leases": {"type": "array"},
+        "steps": {"type": "array", "items": {"$ref": "#/$defs/step"}},
+        "metadata": {"type": "object", "additionalProperties": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["schema_version", "run_id", "kind", "detail", "sequence", "timestamp_ms", "spec_digest", "writer_epoch"],
+      "properties": {
+        "schema_version": {"const": 1}, "run_id": {"type": "string"}, "kind": {"type": "string"},
+        "detail": {"type": "string"}, "sequence": {"type": "integer", "minimum": 1},
+        "timestamp_ms": {"type": "integer", "minimum": 0}, "spec_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "writer_epoch": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "oneOf": [{"$ref": "#/$defs/runSpec"}, {"$ref": "#/$defs/event"}]
+}

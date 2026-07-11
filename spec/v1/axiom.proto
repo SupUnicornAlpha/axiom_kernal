@@ -1,0 +1,23 @@
+syntax = "proto3";
+package axiom.v1;
+
+message RunSpec {
+  uint32 schema_version = 1;
+  string run_id = 2;
+  string name = 3;
+  RunNamespace namespace = 4;
+  BudgetGroup budget = 5;
+  repeated CapabilityLease capability_leases = 6;
+  repeated Step steps = 7;
+  map<string, string> metadata = 8;
+}
+message RunNamespace { string workspace_root = 1; repeated string visible_capabilities = 2; }
+message BudgetGroup { uint64 max_steps = 1; }
+message CapabilityLease { string capability_id = 1; repeated string permissions = 2; }
+message Step { string id = 1; string title = 2; string action_kind = 3; bytes action_payload_json = 4; }
+message Event {
+  uint32 schema_version = 1; string run_id = 2; optional string step_id = 3; string kind = 4;
+  string detail = 5; uint64 sequence = 6; uint64 timestamp_ms = 7; string spec_digest = 8;
+  optional string causation_id = 9; optional string commit_id = 10; bytes effect_json = 11;
+  uint64 writer_epoch = 12; bytes step_proposal_json = 13;
+}

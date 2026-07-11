@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use axiom_spec::{Event, EventKind};
 
@@ -13,6 +14,96 @@ pub trait EventJournal: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct JsonlEventLog {
     path: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct GenerationEventLog {
+    root: PathBuf,
+    switch_lock: Mutex<()>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GenerationReader {
+    pub generation: u64,
+    journal: JsonlEventLog,
+}
+
+impl GenerationEventLog {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self, String> {
+        let this = Self {
+            root: root.into(),
+            switch_lock: Mutex::new(()),
+        };
+        fs::create_dir_all(&this.root).map_err(|error| error.to_string())?;
+        if !this.manifest_path().exists() {
+            this.write_manifest(0)?;
+        }
+        Ok(this)
+    }
+
+    pub fn reader(&self) -> Result<GenerationReader, String> {
+        let generation = self.current_generation()?;
+        Ok(GenerationReader {
+            generation,
+            journal: JsonlEventLog::new(self.generation_path(generation)),
+        })
+    }
+
+    pub fn compact_online(
+        &self,
+        boundaries: BTreeMap<String, u64>,
+    ) -> Result<JournalCompactionReport, String> {
+        let _guard = self
+            .switch_lock
+            .lock()
+            .map_err(|_| "generation_switch_lock_poisoned".to_string())?;
+        let current = self.current_generation()?;
+        let next = current + 1;
+        let report = JsonlEventLog::new(self.generation_path(current))
+            .compact_to(self.generation_path(next), boundaries)?;
+        self.write_manifest(next)?;
+        Ok(report)
+    }
+
+    fn current_generation(&self) -> Result<u64, String> {
+        fs::read_to_string(self.manifest_path())
+            .map_err(|error| error.to_string())?
+            .trim()
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+    }
+
+    fn manifest_path(&self) -> PathBuf {
+        self.root.join("CURRENT")
+    }
+    fn generation_path(&self, generation: u64) -> PathBuf {
+        self.root.join(format!("events-{generation}.jsonl"))
+    }
+    fn write_manifest(&self, generation: u64) -> Result<(), String> {
+        let temporary = self.root.join("CURRENT.tmp");
+        fs::write(&temporary, generation.to_string()).map_err(|error| error.to_string())?;
+        fs::rename(temporary, self.manifest_path()).map_err(|error| error.to_string())
+    }
+}
+
+impl GenerationReader {
+    pub fn load_after(&self, run_id: &str, sequence: u64) -> Result<Vec<Event>, String> {
+        self.journal.load_after(run_id, sequence)
+    }
+}
+
+impl EventJournal for GenerationEventLog {
+    fn append(&self, event: &Event) -> Result<(), String> {
+        let _guard = self
+            .switch_lock
+            .lock()
+            .map_err(|_| "generation_switch_lock_poisoned".to_string())?;
+        JsonlEventLog::new(self.generation_path(self.current_generation()?)).append(event)
+    }
+
+    fn load_after(&self, run_id: &str, sequence: u64) -> Result<Vec<Event>, String> {
+        self.reader()?.load_after(run_id, sequence)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -306,5 +397,52 @@ impl EventJournal for JsonlEventLog {
 
     fn load_after(&self, run_id: &str, sequence: u64) -> Result<Vec<Event>, String> {
         JsonlEventLog::load_after(self, run_id, sequence)
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn readers_survive_generation_switch_under_concurrent_appends() {
+        let root = std::env::temp_dir().join(format!("axiom-generation-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let journal = Arc::new(GenerationEventLog::new(&root).unwrap());
+        for sequence in 1..=20 {
+            journal.append(&event(sequence)).unwrap();
+        }
+        let old_reader = journal.reader().unwrap();
+        let writer = Arc::clone(&journal);
+        let handle = thread::spawn(move || {
+            for sequence in 21..=40 {
+                writer.append(&event(sequence)).unwrap();
+            }
+        });
+        handle.join().unwrap();
+        journal
+            .compact_online(BTreeMap::from([("generation-run".to_string(), 20)]))
+            .unwrap();
+        assert_eq!(
+            old_reader.load_after("generation-run", 0).unwrap().len(),
+            40
+        );
+        let new_reader = journal.reader().unwrap();
+        assert!(new_reader.generation > old_reader.generation);
+        assert_eq!(
+            new_reader.load_after("generation-run", 0).unwrap().len(),
+            20
+        );
+    }
+
+    fn event(sequence: u64) -> Event {
+        let mut event = Event::new("generation-run", None, EventKind::RunStarted, "stress");
+        event.sequence = sequence;
+        event.timestamp_ms = sequence;
+        event.spec_digest = "0".repeat(64);
+        event.writer_epoch = 1;
+        event
     }
 }
