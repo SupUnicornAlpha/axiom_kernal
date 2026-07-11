@@ -1,4 +1,5 @@
 mod capability;
+mod drivers;
 mod eventbus;
 mod eventlog;
 mod kernel;
@@ -12,6 +13,7 @@ mod subrun;
 mod transport;
 
 pub use capability::{CapabilityContext, CapabilityDriver, CapabilityRegistry, StaticCapability};
+pub use drivers::{CliDriver, FilesystemDriver, FunctionDriver};
 pub use eventbus::{EventBus, InMemoryEventBus};
 pub use eventlog::{
     EventJournal, JournalCompactionReport, JournalIntegrityReport, JournalRepairReport,
@@ -25,7 +27,9 @@ pub use migration::{
     MigrationReport, MigrationStatus, CHECKPOINT_SCHEMA_VERSION,
 };
 pub use runstore::{FileRunStore, MemoryRunStore, RunStore, RunStoreRecord};
-pub use scheduler::{QueueScheduler, Scheduler};
+pub use scheduler::{
+    MockModelDriver, ModelDecision, ModelDriver, QueueScheduler, ReActScheduler, Scheduler,
+};
 pub use shell::{
     AuditShell, CompositeShell, MinimalPolicyEngine, PolicyEngine, PolicyMiddleware, Shell,
     ShellDecision, ShellMiddleware, TitlePolicyMiddleware,

@@ -23,6 +23,7 @@ pub enum KernelError {
     RunStore(String),
     MissingCheckpoint(String),
     Lease(String),
+    Scheduler(String),
 }
 
 #[derive(Clone, Debug)]
@@ -250,7 +251,11 @@ where
         )?;
         self.checkpoint(&state, &spec_digest, &cursor, lease)?;
 
-        while let Some(original_step) = self.scheduler.next(spec, state.next_step_index) {
+        while let Some(original_step) = self
+            .scheduler
+            .next(spec, &state)
+            .map_err(KernelError::Scheduler)?
+        {
             if state.next_step_index >= spec.budget.max_steps {
                 state.status = RunStatus::Failed;
                 let detail = format!("budget_exceeded:{}", spec.budget.max_steps);
@@ -285,7 +290,7 @@ where
                 ),
             )?;
 
-            let step = match self.shell.before_step(spec, &state, original_step) {
+            let step = match self.shell.before_step(spec, &state, &original_step) {
                 ShellDecision::Allow => {
                     self.push_event(
                         &mut events,
@@ -658,20 +663,10 @@ where
                             KernelError::EventLog("committed_effect_missing_payload".to_string())
                         })?;
                         apply_effect(&mut checkpoint.state, effect);
-                        let step_id = event.step_id.as_ref().ok_or_else(|| {
+                        event.step_id.as_ref().ok_or_else(|| {
                             KernelError::EventLog("committed_effect_missing_step_id".to_string())
                         })?;
-                        let step_index = spec
-                            .steps
-                            .iter()
-                            .position(|step| &step.id == step_id)
-                            .ok_or_else(|| {
-                                KernelError::EventLog(format!(
-                                    "committed_effect_unknown_step:{step_id}"
-                                ))
-                            })?;
-                        checkpoint.state.next_step_index =
-                            checkpoint.state.next_step_index.max(step_index + 1);
+                        checkpoint.state.next_step_index += 1;
                     }
                 }
                 EventKind::RunCompleted => checkpoint.state.status = RunStatus::Completed,
