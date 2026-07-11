@@ -2,6 +2,7 @@ mod capability;
 mod drivers;
 mod eventbus;
 mod eventlog;
+mod facade;
 mod kernel;
 mod lease;
 mod migration;
@@ -19,6 +20,7 @@ pub use eventlog::{
     EventJournal, JournalCompactionReport, JournalIntegrityReport, JournalRepairReport,
     JsonlEventLog, ReplaySummary,
 };
+pub use facade::{AllowWrap, WrapError, WrapHarness, WrapPolicy, WrapReport};
 pub use kernel::{Kernel, KernelError, RunReport};
 pub use lease::{FileRunLeaseStore, MemoryRunLeaseStore, RunLeaseStore, WriterLease};
 pub use migration::{
