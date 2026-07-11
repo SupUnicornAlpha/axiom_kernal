@@ -251,11 +251,36 @@ where
         )?;
         self.checkpoint(&state, &spec_digest, &cursor, lease)?;
 
-        while let Some(original_step) = self
-            .scheduler
-            .next(spec, &state)
-            .map_err(KernelError::Scheduler)?
-        {
+        loop {
+            let original_step = if let Some(step) = state.pending_step.clone() {
+                step
+            } else {
+                let Some(step) = self
+                    .scheduler
+                    .next(spec, &state)
+                    .map_err(KernelError::Scheduler)?
+                else {
+                    break;
+                };
+                state.pending_step = Some(step.clone());
+                let mut proposed = Event::new(
+                    &spec.run_id,
+                    Some(step.id.clone()),
+                    EventKind::StepProposed,
+                    &step.title,
+                );
+                proposed.step_proposal = Some(step.clone());
+                self.push_event(
+                    &mut events,
+                    &mut event_bus,
+                    &mut cursor,
+                    &spec_digest,
+                    lease,
+                    proposed,
+                )?;
+                self.checkpoint(&state, &spec_digest, &cursor, lease)?;
+                step
+            };
             if state.next_step_index >= spec.budget.max_steps {
                 state.status = RunStatus::Failed;
                 let detail = format!("budget_exceeded:{}", spec.budget.max_steps);
@@ -275,20 +300,6 @@ where
                 self.checkpoint(&state, &spec_digest, &cursor, lease)?;
                 return Err(KernelError::BudgetExceeded(detail));
             }
-
-            self.push_event(
-                &mut events,
-                &mut event_bus,
-                &mut cursor,
-                &spec_digest,
-                lease,
-                Event::new(
-                    &spec.run_id,
-                    Some(original_step.id.clone()),
-                    EventKind::StepProposed,
-                    &original_step.title,
-                ),
-            )?;
 
             let step = match self.shell.before_step(spec, &state, &original_step) {
                 ShellDecision::Allow => {
@@ -325,6 +336,7 @@ where
                 }
                 ShellDecision::Deny { reason } => {
                     state.denied_actions.push(original_step.id.clone());
+                    state.pending_step = None;
                     self.push_event(
                         &mut events,
                         &mut event_bus,
@@ -415,6 +427,7 @@ where
                 apply_effect(&mut state, effect);
             }
 
+            state.pending_step = None;
             state.next_step_index += 1;
             self.checkpoint(&state, &spec_digest, &cursor, lease)?;
         }
@@ -654,6 +667,12 @@ where
                 )));
             }
             match event.kind {
+                EventKind::StepProposed => {
+                    checkpoint.state.pending_step =
+                        Some(event.step_proposal.clone().ok_or_else(|| {
+                            KernelError::EventLog("step_proposed_missing_payload".to_string())
+                        })?);
+                }
                 EventKind::EffectCommitted => {
                     let commit_id = event.commit_id.as_ref().ok_or_else(|| {
                         KernelError::EventLog("committed_effect_missing_commit_id".to_string())
@@ -668,6 +687,7 @@ where
                         })?;
                         checkpoint.state.next_step_index += 1;
                     }
+                    checkpoint.state.pending_step = None;
                 }
                 EventKind::RunCompleted => checkpoint.state.status = RunStatus::Completed,
                 EventKind::RunFailed => checkpoint.state.status = RunStatus::Failed,

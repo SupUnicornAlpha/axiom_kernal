@@ -102,6 +102,8 @@ pub struct RunState {
     pub messages: Vec<Message>,
     pub outputs: Vec<String>,
     pub denied_actions: Vec<String>,
+    #[serde(default)]
+    pub pending_step: Option<Step>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +152,8 @@ pub struct Event {
     pub commit_id: Option<String>,
     pub effect: Option<Effect>,
     pub writer_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_proposal: Option<Step>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +210,7 @@ impl Event {
             commit_id: None,
             effect: None,
             writer_epoch: 0,
+            step_proposal: None,
         }
     }
 }
@@ -265,6 +270,7 @@ impl RunState {
             messages: Vec::new(),
             outputs: Vec::new(),
             denied_actions: Vec::new(),
+            pending_step: None,
         }
     }
 }
