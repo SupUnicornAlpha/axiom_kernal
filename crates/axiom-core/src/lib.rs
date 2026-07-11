@@ -7,12 +7,16 @@ mod migration;
 mod runstore;
 mod scheduler;
 mod shell;
+mod snapshot;
 mod subrun;
 mod transport;
 
 pub use capability::{CapabilityContext, CapabilityDriver, CapabilityRegistry, StaticCapability};
 pub use eventbus::{EventBus, InMemoryEventBus};
-pub use eventlog::{EventJournal, JsonlEventLog, ReplaySummary};
+pub use eventlog::{
+    EventJournal, JournalCompactionReport, JournalIntegrityReport, JournalRepairReport,
+    JsonlEventLog, ReplaySummary,
+};
 pub use kernel::{Kernel, KernelError, RunReport};
 pub use lease::{FileRunLeaseStore, MemoryRunLeaseStore, RunLeaseStore, WriterLease};
 pub use migration::{
@@ -25,6 +29,9 @@ pub use scheduler::{QueueScheduler, Scheduler};
 pub use shell::{
     AuditShell, CompositeShell, MinimalPolicyEngine, PolicyEngine, PolicyMiddleware, Shell,
     ShellDecision, ShellMiddleware, TitlePolicyMiddleware,
+};
+pub use snapshot::{
+    FileSnapshotArchive, SnapshotArchive, SnapshotMetadata, SnapshotRetentionReport,
 };
 pub use subrun::{LocalSubRunTransport, RemoteSubRunTransportMock, SubRunTransport};
 pub use transport::{CapabilityTransport, LocalTransport, RemoteTransportMock};
