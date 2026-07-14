@@ -10,7 +10,8 @@
 - 冻结并维护最小 spec。
 - 实现 Kernel、EventBus、Checkpoint、Transport、CapabilityRegistry。
 - 实现 ShellDecision、ReActScheduler、ChildRun、CapabilityLease。
-- 后续提供 TypeScript、Python、Go、Java 薄 SDK。
+- 提供 TypeScript、Python、Go 薄 SDK；Java SDK 后续实现。
+- Go SDK 已包含 canonical spec/builder/digest、agent sidecar protocol 与 workspace tool host。
 
 ## MVP 优先级
 

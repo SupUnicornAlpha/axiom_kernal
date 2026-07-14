@@ -6,6 +6,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.24'}
       - run: cargo test --locked
+      - run: go test ./...
+        working-directory: sdks/go
       - run: node -e "JSON.parse(require('fs').readFileSync('spec/v1/axiom.schema.json'))"
       - run: protoc --descriptor_set_out=/tmp/axiom.pb spec/v1/axiom.proto
